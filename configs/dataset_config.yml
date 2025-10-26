@@ -1,0 +1,30 @@
+# 数据集预处理配置文件
+# Dataset Preprocessing Configuration
+
+# 路径配置
+paths:
+  raw_root: "data/raw_videos"    # 原始视频根目录
+  output_root: "data/"            # 输出根目录
+
+# 视频处理参数
+video:
+  fps: 4            # 抽帧帧率
+  clip_len: 8       # 每个clip的帧数
+  stride: null      # 滑窗步长 (null表示使用 clip_len // 2)
+
+# 扩展名过滤
+extensions:
+  - ".mp4"
+  - ".avi"
+  - ".mov"
+  - ".mkv"
+
+# 设备配置
+device:
+  use_gpu: true     # 是否使用GPU
+  num_workers: 2    # 并行进程数 (使用GPU时建议2-4)
+
+# 过滤配置
+filter:
+  pattern: null     # 路径过滤模式 (例如: "deepfakes")
+                     # null表示处理所有视频
