@@ -22,7 +22,7 @@ extensions:
 # 设备配置
 device:
   use_gpu: true     # 是否使用GPU
-  num_workers: 2    # 并行进程数 (使用GPU时建议2-4)
+  num_workers: 1    # 并行进程数 (单进程模式以避免GPU竞争)
 
 # 过滤配置
 filter:

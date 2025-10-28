@@ -32,7 +32,7 @@
 **文件**: `generate_clips.py` + `preprocess_pipline.py` + `build_dataset_index.py`
 
 **输出内容**:
-1. **对齐后的帧图片**: `data/clip_frames/.../clip_XXX/frame.jpg`
+1. **对齐后的帧图片**: `data/clips/.../clip_XXX/frame.jpg`
 2. **元数据JSON**: `data/meta/.../clip_meta.json`
 3. **数据集索引文件**: `data/dataset_index.pkl` 或 `data/dataset_index.npy`
 
@@ -41,7 +41,7 @@
 {
     'clips': [
         {
-            'clip_dir': 'clip_frames/FFPP/deepfakes/c23/videos/clip_000',
+            'clip_dir': 'clips/FFPP/deepfakes/c23/videos/clip_000',
             'frames': [
                 {'out_name': '000000.jpg', 'src_name': '000123.jpg', ...},
                 ...
@@ -89,11 +89,13 @@ python src/preprocess/preprocess_pipline.py --config configs/dataset_config.yml 
 2. **多进程处理**: 使用多个worker并行处理
 3. **对每个视频**:
    - 抽帧 → `data/frames/.../`
-   - 人脸检测与对齐
-   - 计算特征并选择关键帧
-   - 生成 clips → `data/clip_frames/.../clip_XXX/`
+   - 人脸检测与对齐 → `data/faces_aligned/.../` (缓存)
+   - 计算特征 → `data/features/.../` (缓存)
+   - 选择关键帧并生成 clips → `data/clips/.../clip_XXX/`
    - 保存元数据 → `data/meta/.../clip_meta.json`
 4. **构建索引**: 自动生成 `data/dataset_index.pkl`
+
+**缓存机制**: 人脸对齐和特征计算的结果会被缓存，如果只需要修改 clip_len 或 stride 重新生成 clips，会直接从缓存读取，无需重复对齐和计算特征，大大提高处理速度。
 
 ## 输出目录结构
 
@@ -101,7 +103,19 @@ python src/preprocess/preprocess_pipline.py --config configs/dataset_config.yml 
 data/
 ├── frames/              # 原始抽帧结果
 │   └── FFPP/...
-├── clip_frames/         # 对齐后的 clip 帧
+├── faces_aligned/       # 人脸对齐结果（缓存）
+│   └── FFPP/...
+│       └── [视频名]/
+│           ├── 000000.jpg
+│           ├── 000001.jpg
+│           └── ... (112x112 对齐人脸)
+├── features/            # 特征向量（缓存）
+│   └── FFPP/...
+│       └── [视频名]/
+│           ├── 000000.npy
+│           ├── 000001.npy
+│           └── ... (32维特征向量)
+├── clips/               # 对齐后的 clip 帧（最终训练样本）
 │   └── FFPP/
 │       └── deepfakes/
 │           └── c23/
@@ -165,11 +179,30 @@ python src/preprocess/build_dataset_index.py \
 | num_workers | 并行进程数 | 2 |
 | filter_pattern | 路径过滤（如'deepfakes'） | null |
 
+## 依赖安装
+
+确保已安装所有必需的依赖项：
+
+```bash
+# 激活环境
+conda activate mntsm
+
+# 安装 InsightFace 及其依赖
+pip install insightface onnxruntime
+
+# 如果有 GPU 并想使用 GPU 加速
+pip install onnxruntime-gpu
+
+# 或使用完整的环境配置
+conda env update -f env.yml
+```
+
 ## 注意事项
 
-1. **GPU显存**: 使用GPU时建议 `num_workers=2-4`，避免显存不足
-2. **Windows支持**: 已添加 multiprocessing.spawn 支持
-3. **人脸检测失败**: 会自动跳过无人的帧
-4. **视频处理失败**: 会保存错误信息到 meta，不会中断整个流程
-5. **索引自动构建**: 预处理完成后自动生成，无需手动操作
+1. **依赖要求**: 需要安装 `onnxruntime` 或 `onnxruntime-gpu` 才能使用 InsightFace
+2. **GPU显存**: 使用GPU时建议 `num_workers=2-4`，避免显存不足
+3. **Windows支持**: 已添加 multiprocessing.spawn 支持
+4. **人脸检测失败**: 会自动跳过无人的帧
+5. **视频处理失败**: 会保存错误信息到 meta，不会中断整个流程
+6. **索引自动构建**: 预处理完成后自动生成，无需手动操作
 

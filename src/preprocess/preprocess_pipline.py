@@ -76,7 +76,8 @@ def process_single_video(args):
 
 
 def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None, 
-                  use_gpu=True, num_workers=4, filter_pattern=None, extensions=None):
+                  use_gpu=True, num_workers=1, filter_pattern=None, extensions=None, 
+                  skip_processed=True):
     """批量处理视频数据集
     
     Args:
@@ -86,9 +87,10 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
         clip_len: 每个 clip 的帧数
         stride: 滑窗步长（None 表示 clip_len // 2）
         use_gpu: 是否使用 GPU
-        num_workers: 并行进程数（建议 2-4，避免 GPU 显存不足）
+        num_workers: 并行进程数（默认为1，避免GPU竞争）
         filter_pattern: 可选的路径过滤模式（例如 'deepfakes' 只处理包含该字符串的路径）
         extensions: 支持的视频文件扩展名列表
+        skip_processed: 是否跳过已处理的视频（实现断点续传）
     """
     print(f"[INFO] 收集视频文件: {raw_root}")
     if extensions is None:
@@ -106,37 +108,79 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
         print("[WARN] 没有找到视频文件")
         return
     
-    # 准备参数
-    tasks = [(v, output_root, raw_root, fps, clip_len, stride, use_gpu) 
-             for v in video_paths]
-    
-    # 多进程处理
-    success_count = 0
-    fail_count = 0
-    
-    print(f"[INFO] 开始处理，使用 {num_workers} 个进程...")
-    
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(process_single_video, task): task[0] 
-                   for task in tasks}
+    # 单进程模式：在主进程中创建detector并直接处理
+    if num_workers == 1:
+        print(f"[INFO] 使用单进程模式，GPU: {use_gpu}")
         
-        with tqdm(total=len(video_paths), desc="处理进度") as pbar:
-            for future in as_completed(futures):
-                video_path, success, message = future.result()
-                
-                if success:
-                    success_count += 1
-                    pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count}")
-                else:
+        # 在主进程中初始化detector（避免重复初始化）
+        detector = create_face_detector(use_gpu=use_gpu)
+        
+        success_count = 0
+        fail_count = 0
+        skipped_count = 0
+        
+        with tqdm(total=len(video_paths), desc="处理视频") as pbar:
+            for video_path in video_paths:
+                try:
+                    meta, status = build_clips(
+                        video_path=video_path,
+                        output_root=output_root,
+                        detector=detector,
+                        fps=fps,
+                        clip_len=clip_len,
+                        raw_root=raw_root,
+                        stride=stride,
+                        skip_if_processed=skip_processed
+                    )
+                    
+                    if status == 'skipped':
+                        skipped_count += 1
+                        pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count} | ⊘ {skipped_count}")
+                    elif status == 'processed':
+                        success_count += 1
+                        pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count} | ⊘ {skipped_count}")
+                    else:  # failed
+                        fail_count += 1
+                        pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count} | ⊘ {skipped_count}")
+                    
+                except Exception as e:
                     fail_count += 1
-                    print(f"\n[ERROR] {os.path.basename(video_path)}: {message}")
-                    pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count}")
+                    print(f"\n[ERROR] {os.path.basename(video_path)}: {str(e)}")
+                    pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count} | ⊘ {skipped_count}")
                 
                 pbar.update(1)
+    else:
+        # 多进程模式（不推荐，可能导致GPU竞争）
+        print(f"[WARN] 使用多进程模式 ({num_workers} 进程)，可能导致GPU资源竞争")
+        tasks = [(v, output_root, raw_root, fps, clip_len, stride, use_gpu) 
+                 for v in video_paths]
+        
+        success_count = 0
+        fail_count = 0
+        
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(process_single_video, task): task[0] 
+                       for task in tasks}
+            
+            with tqdm(total=len(video_paths), desc="处理视频") as pbar:
+                for future in as_completed(futures):
+                    video_path, success, message = future.result()
+                    
+                    if success:
+                        success_count += 1
+                        pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count}")
+                    else:
+                        fail_count += 1
+                        print(f"\n[ERROR] {os.path.basename(video_path)}: {message}")
+                        pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count}")
+                    
+                    pbar.update(1)
     
     print(f"\n[INFO] 处理完成!")
     print(f"  成功: {success_count}")
     print(f"  失败: {fail_count}")
+    if 'skipped_count' in locals():
+        print(f"  跳过: {skipped_count}")
     print(f"  总计: {len(video_paths)}")
     
     # 5) 构建数据集索引
@@ -181,6 +225,8 @@ def main():
                         help='并行进程数 (会覆盖配置文件中的设置)')
     parser.add_argument('--filter', type=str, default=None,
                         help='路径过滤模式 (会覆盖配置文件中的设置)')
+    parser.add_argument('--no-skip', action='store_true',
+                        help='不跳过已处理的视频（默认会跳过以实现断点续传）')
     
     args = parser.parse_args()
     
@@ -208,6 +254,9 @@ def main():
         use_gpu = config.get('device', {}).get('use_gpu', True)
     if args.cpu:
         use_gpu = False
+    
+    # 处理 skip_processed 设置
+    skip_processed = not args.no_skip
     
     # 验证必需参数
     if raw_root is None:
@@ -249,7 +298,8 @@ def main():
         use_gpu=use_gpu,
         num_workers=num_workers,
         filter_pattern=filter_pattern,
-        extensions=extensions
+        extensions=extensions,
+        skip_processed=skip_processed
     )
 
 

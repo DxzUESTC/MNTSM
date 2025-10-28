@@ -3,6 +3,7 @@ import os
 import json
 import cv2
 import numpy as np
+from tqdm import tqdm
 from extract_frames import extract_frames
 from face_align import align_face
 from keyframe_selection import select_keyframes
@@ -54,7 +55,61 @@ def compute_face_feature(aligned_face):
     return np.array(features, dtype=np.float32)
 
 
-def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=None, stride=None):
+def is_video_processed(video_path, output_root, raw_root=None):
+    """检查视频是否已经被成功处理过
+    
+    Args:
+        video_path: 原始视频文件完整路径
+        output_root: 存放处理结果的根目录
+        raw_root: raw_videos 的根目录
+    
+    Returns:
+        bool: True表示已处理且完整，False表示未处理或不完整
+    """
+    # 计算相对路径
+    if raw_root:
+        rel_path = os.path.relpath(video_path, raw_root)
+    else:
+        rel_path = os.path.basename(video_path)
+    rel_dir = os.path.dirname(rel_path)
+    video_stem = os.path.splitext(os.path.basename(rel_path))[0]
+    
+    meta_dir = os.path.join(output_root, 'meta', rel_dir, video_stem)
+    meta_path = os.path.join(meta_dir, 'clip_meta.json')
+    
+    # 检查 meta 文件是否存在且有效
+    if not os.path.exists(meta_path):
+        return False
+    
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+        
+        # 检查是否有错误标记
+        if 'error' in meta:
+            return False
+        
+        # 检查是否有有效的 clips
+        if len(meta.get('clips', [])) == 0:
+            return False
+        
+        # 检查 clips 目录是否存在且不为空
+        clip_dir = os.path.join(output_root, 'clips', rel_dir, video_stem)
+        if not os.path.exists(clip_dir):
+            return False
+        
+        # 检查至少有一个 clip 目录存在
+        clip_subdirs = [d for d in os.listdir(clip_dir) if d.startswith('clip_')]
+        if len(clip_subdirs) == 0:
+            return False
+        
+        return True
+    except Exception:
+        return False
+
+
+def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=None, stride=None, 
+                skip_if_processed=False):
     """
     从视频生成可训练的 clip（抽帧 -> 对齐 -> 关键帧选择 -> 滑窗生成多 clip）
     输出会镜像 raw_root 下的视频相对路径。
@@ -72,8 +127,9 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
       - clip_len: 每个 clip 的帧数
       - raw_root: raw_videos 的根目录，用于保持目录结构（例如 data/raw_videos）
       - stride: 滑窗步长（默认为 clip_len // 2，即 50% 重叠）
+      - skip_if_processed: 如果视频已处理过是否跳过
     返回:
-      - meta dict (包含多个 clip 的信息)
+      - (meta dict, status): meta信息和状态('processed'/'skipped'/'failed')
     """
     if detector is None:
         raise ValueError("detector 不能为 None，请先调用 create_face_detector() 创建并传入")
@@ -91,11 +147,26 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
 
     # 构建各功能目录，镜像 raw_videos 结构： e.g. output_root/frames/<rel_dir>/<video_stem>/
     frame_dir = os.path.join(output_root, 'frames', rel_dir, video_stem)
-    clip_dir = os.path.join(output_root, 'clip_frames', rel_dir, video_stem)
+    aligned_dir = os.path.join(output_root, 'faces_aligned', rel_dir, video_stem)
+    feature_dir = os.path.join(output_root, 'features', rel_dir, video_stem)
+    clip_dir = os.path.join(output_root, 'clips', rel_dir, video_stem)
     meta_dir = os.path.join(output_root, 'meta', rel_dir, video_stem)
+    
     os.makedirs(frame_dir, exist_ok=True)
+    os.makedirs(aligned_dir, exist_ok=True)
+    os.makedirs(feature_dir, exist_ok=True)
     os.makedirs(clip_dir, exist_ok=True)
     os.makedirs(meta_dir, exist_ok=True)
+    
+    # 如果设置了跳过已处理的视频且该视频已处理过，直接返回
+    if skip_if_processed and is_video_processed(video_path, output_root, raw_root):
+        try:
+            meta_path = os.path.join(meta_dir, 'clip_meta.json')
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            return meta, 'skipped'
+        except Exception:
+            pass
 
     # 1）抽帧（会在 frame_dir 下写入帧图片）
     num_extracted = extract_frames(video_path, frame_dir, fps)
@@ -105,7 +176,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
         meta = {"video": video_path, "clip_len": clip_len, "clips": []}
         json.dump(meta, open(os.path.join(meta_dir, 'clip_meta.json'), 'w', encoding='utf-8'),
                   ensure_ascii=False, indent=2)
-        return meta
+        return meta, 'failed'
 
     try:
         # 2) 读取抽取帧并对齐，生成特征向量列表
@@ -115,12 +186,37 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
             meta = {"video": video_path, "clip_len": clip_len, "clips": []}
             json.dump(meta, open(os.path.join(meta_dir, 'clip_meta.json'), 'w', encoding='utf-8'),
                       ensure_ascii=False, indent=2)
-            return meta
+            return meta, 'failed'
 
         features = []
         aligned_imgs = []
         src_indices = []  # 原始帧索引对应关系（相对于 frame_files 列表）
-        for i, fname in enumerate(frame_files):
+        
+        # 添加进度条显示对齐人脸的处理进度
+        for i, fname in enumerate(tqdm(frame_files, desc="人脸对齐", leave=False)):
+            # 构建缓存文件路径
+            aligned_cache_path = os.path.join(aligned_dir, fname)
+            # 将 .jpg/.png 替换为 .npy
+            feature_fname = fname.replace('.jpg', '.npy').replace('.png', '.npy')
+            feature_cache_path = os.path.join(feature_dir, feature_fname)
+            
+            aligned = None
+            feat = None
+            
+            # 先尝试从缓存加载
+            if os.path.exists(aligned_cache_path) and os.path.exists(feature_cache_path):
+                try:
+                    aligned = cv2.imread(aligned_cache_path)
+                    feat = np.load(feature_cache_path)
+                    if aligned is not None and feat is not None:
+                        aligned_imgs.append(aligned)
+                        features.append(feat)
+                        src_indices.append(i)
+                        continue
+                except Exception as e:
+                    print(f"[WARN] 加载缓存失败，将重新处理: {fname}, 错误: {e}")
+            
+            # 如果缓存不存在或加载失败，重新处理
             fp = os.path.join(frame_dir, fname)
             img = cv2.imread(fp)
             if img is None:
@@ -129,8 +225,22 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
             if aligned is None:
                 # 若检测/对齐失败，跳过该帧
                 continue
+            
+            # 保存对齐图像到缓存
+            try:
+                cv2.imwrite(aligned_cache_path, aligned)
+            except Exception as e:
+                print(f"[WARN] 保存对齐图像缓存失败: {aligned_cache_path}, 错误: {e}")
+            
             # 使用改进的局部区域特征（均值+方差）
             feat = compute_face_feature(aligned)
+            
+            # 保存特征到缓存
+            try:
+                np.save(feature_cache_path, feat)
+            except Exception as e:
+                print(f"[WARN] 保存特征缓存失败: {feature_cache_path}, 错误: {e}")
+            
             features.append(feat)
             aligned_imgs.append(aligned)
             src_indices.append(i)
@@ -139,7 +249,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
             meta = {"video": video_path, "clip_len": clip_len, "clips": []}
             json.dump(meta, open(os.path.join(meta_dir, 'clip_meta.json'), 'w', encoding='utf-8'),
                       ensure_ascii=False, indent=2)
-            return meta
+            return meta, 'failed'
 
         # 3) 滑窗生成多个 clip（当帧数 > 32 时）
         num_aligned = len(features)
@@ -228,7 +338,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
         json.dump(meta, open(meta_path, 'w', encoding='utf-8'),
                   ensure_ascii=False, indent=2)
         
-        return meta
+        return meta, 'processed'
         
     except Exception as e:
         print(f"[ERROR] 处理视频失败 {video_path}: {e}")
@@ -242,6 +352,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
         try:
             json.dump(error_meta, open(meta_path, 'w', encoding='utf-8'),
                       ensure_ascii=False, indent=2)
+            return error_meta, 'failed'
         except:
             pass
-        raise
+        return None, 'failed'
