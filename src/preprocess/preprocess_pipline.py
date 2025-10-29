@@ -8,7 +8,7 @@ import multiprocessing as mp
 import yaml
 
 from generate_clips import create_face_detector, build_clips
-from build_dataset_index import collect_clips, determine_label_from_path, save_dataset_index
+from build_dataset_index import collect_clips, determine_label_from_path, save_dataset_index, build_indices_by_dataset
 
 
 def load_config(config_path):
@@ -187,21 +187,26 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
         print(f"  跳过: {skipped_count}")
     print(f"  总计: {len(video_paths)}")
     
-    # 5) 构建数据集索引
+    # 5) 构建数据集索引（按数据集分别构建，同时创建合并索引）
     meta_root = os.path.join(output_root, 'meta')
     if os.path.exists(meta_root):
         print(f"\n[INFO] 开始构建数据集索引...")
-        clips = collect_clips(meta_root, output_root=output_root, verify_clips=True)
-        if len(clips) > 0:
-            # 为每个 clip 分配标签
-            for clip in clips:
-                label = determine_label_from_path(clip['raw_rel_path'])
-                clip['label'] = label
-            
-            # 保存索引文件
-            index_path = save_dataset_index(clips, output_root, format='pkl')
-            print(f"[INFO] 索引文件已保存: {index_path}")
-            print(f"[INFO] 总共 {len(clips)} 个 clips 可用于训练")
+        print("[INFO] 将按数据集分别创建索引，同时创建合并索引")
+        
+        index_paths = build_indices_by_dataset(
+            meta_root=meta_root,
+            output_root=output_root,
+            format='pkl',
+            verify_clips=True,
+            save_merged=True,
+            dataset_filter=None  # 处理所有数据集
+        )
+        
+        if index_paths:
+            print(f"\n[INFO] 索引构建完成!")
+            print(f"  单独数据集索引保存在: {os.path.join(output_root, 'datasets')}")
+            if '_merged' in index_paths:
+                print(f"  合并索引: {index_paths['_merged']}")
         else:
             print("[WARN] 未找到任何 clips，跳过索引构建")
 
