@@ -56,7 +56,7 @@ def process_single_video(args):
         # 每个进程创建自己的 detector
         detector = create_face_detector(use_gpu=use_gpu)
         
-        meta = build_clips(
+        meta, status = build_clips(
             video_path=video_path,
             output_root=output_root,
             detector=detector,
@@ -65,6 +65,9 @@ def process_single_video(args):
             raw_root=raw_root,
             stride=stride
         )
+        
+        if status == 'failed':
+            return (video_path, False, "处理失败")
         
         num_clips = meta.get('num_clips', 0)
         num_aligned = meta.get('num_aligned_frames', 0)
@@ -76,7 +79,7 @@ def process_single_video(args):
 
 
 def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None, 
-                  use_gpu=True, num_workers=1, filter_pattern=None, extensions=None, 
+                  use_gpu=True, num_workers=3, filter_pattern=None, extensions=None, 
                   skip_processed=True):
     """批量处理视频数据集
     
@@ -141,6 +144,7 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
                         pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count} | ⊘ {skipped_count}")
                     else:  # failed
                         fail_count += 1
+                        print(f"\n[ERROR] 视频处理失败: {os.path.basename(video_path)}")
                         pbar.set_postfix_str(f"✓ {success_count} | ✗ {fail_count} | ⊘ {skipped_count}")
                     
                 except Exception as e:
@@ -187,7 +191,7 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
     meta_root = os.path.join(output_root, 'meta')
     if os.path.exists(meta_root):
         print(f"\n[INFO] 开始构建数据集索引...")
-        clips = collect_clips(meta_root)
+        clips = collect_clips(meta_root, output_root=output_root, verify_clips=True)
         if len(clips) > 0:
             # 为每个 clip 分配标签
             for clip in clips:

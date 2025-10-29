@@ -245,7 +245,16 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
             aligned_imgs.append(aligned)
             src_indices.append(i)
 
+        # 统计对齐情况
+        num_frames = len(frame_files)
+        num_aligned = len(features)
+        if num_frames > 0:
+            align_rate = num_aligned / num_frames * 100
+            if align_rate < 50:  # 对齐率低于50%给出警告
+                print(f"[WARN] 视频对齐率较低 ({align_rate:.1f}%, {num_aligned}/{num_frames}): {video_path}")
+        
         if len(features) == 0:
+            print(f"[WARN] 视频没有成功对齐任何帧: {video_path}")
             meta = {"video": video_path, "clip_len": clip_len, "clips": []}
             json.dump(meta, open(os.path.join(meta_dir, 'clip_meta.json'), 'w', encoding='utf-8'),
                       ensure_ascii=False, indent=2)

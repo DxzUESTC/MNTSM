@@ -4,6 +4,40 @@
 
 当前预处理脚本可以完成以下操作：
 
+### 0. 清理预处理数据
+**文件**: `clean_preprocessed_data.py`
+
+用于清理已生成的预处理文件和目录，方便重新开始预处理。
+
+**使用方法**:
+```bash
+# 清理所有预处理数据（会询问确认）
+python src/preprocess/clean_preprocessed_data.py
+
+# 清理所有预处理数据（不询问确认）
+python src/preprocess/clean_preprocessed_data.py --no_confirm
+
+# 清理指定目录的数据
+python src/preprocess/clean_preprocessed_data.py --output_root data/
+
+# 保留部分数据（例如只清理clips和meta，保留缓存）
+python src/preprocess/clean_preprocessed_data.py --keep_faces --keep_features
+
+# 查看帮助
+python src/preprocess/clean_preprocessed_data.py --help
+```
+
+**参数说明**:
+- `--output_root`: 预处理数据根目录（默认: data/）
+- `--keep_frames`: 保留 frames 目录
+- `--keep_faces`: 保留 faces_aligned 目录
+- `--keep_features`: 保留 features 目录
+- `--keep_clips`: 保留 clips 目录
+- `--keep_meta`: 保留 meta 目录
+- `--keep_index`: 保留索引文件
+- `--keep_stats`: 保留统计文件
+- `--no_confirm`: 不询问确认，直接删除
+
 ### 1. 视频数据集进行抽帧
 **文件**: `extract_frames.py`
 
@@ -19,6 +53,7 @@
 - 五点关键点对齐（双眼、鼻尖、嘴角）
 - 输出 112x112 标准对齐人脸
 - 多张人脸时自动选择最大的人脸
+- 支持外扩参数（默认 expand_ratio=0.2，即20%），确保人脸完整
 
 ### 3. 基于特征差计算关键帧并提取关键帧
 **文件**: `keyframe_selection.py`

@@ -10,11 +10,13 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-def collect_clips(meta_root):
+def collect_clips(meta_root, output_root=None, verify_clips=True):
     """递归收集所有 meta 目录下的 clip_meta.json 文件
     
     Args:
         meta_root: meta 目录根路径（例如 data/meta）
+        output_root: 输出根目录（用于验证clip目录是否存在，例如 data/）
+        verify_clips: 是否验证clip目录存在（默认True）
     
     Returns:
         clips: 所有 clip 的列表，每个元素是一个字典，包含：
@@ -24,6 +26,7 @@ def collect_clips(meta_root):
             - raw_rel_path: 原始视频相对路径（用于确定标签）
     """
     clips = []
+    skipped_count = 0
     
     print(f"[INFO] 扫描 meta 目录: {meta_root}")
     for root, dirs, files in os.walk(meta_root):
@@ -47,10 +50,34 @@ def collect_clips(meta_root):
                 
                 # 提取所有 clips
                 for clip_info in meta.get('clips', []):
+                    clip_dir = clip_info.get('clip_dir', '')
+                    
+                    # 验证clip目录是否存在
+                    if verify_clips and output_root:
+                        clip_abs_path = os.path.join(output_root, clip_dir)
+                        if not os.path.exists(clip_abs_path):
+                            skipped_count += 1
+                            continue
+                        
+                        # 验证clip目录中有帧文件
+                        try:
+                            if not os.path.isdir(clip_abs_path):
+                                skipped_count += 1
+                                continue
+                            frame_files = [f for f in os.listdir(clip_abs_path) 
+                                         if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                            if len(frame_files) == 0:
+                                skipped_count += 1
+                                continue
+                        except (OSError, PermissionError) as e:
+                            # 如果目录无法访问（权限问题、已被删除等），跳过
+                            skipped_count += 1
+                            continue
+                    
                     clip_data = {
                         **video_info,
                         'clip_id': clip_info.get('clip_id', 0),
-                        'clip_dir': clip_info.get('clip_dir', ''),
+                        'clip_dir': clip_dir,
                         'frames': clip_info.get('frames', [])
                     }
                     clips.append(clip_data)
@@ -58,6 +85,9 @@ def collect_clips(meta_root):
             except Exception as e:
                 print(f"[WARN] 读取失败 {meta_path}: {e}")
                 continue
+    
+    if skipped_count > 0:
+        print(f"[INFO] 跳过了 {skipped_count} 个不存在的或空的 clip 目录")
     
     return clips
 
@@ -182,6 +212,8 @@ def main():
                         help='输出根目录')
     parser.add_argument('--format', type=str, default='pkl', choices=['pkl', 'npy'],
                         help='输出格式 (pkl 或 npy)')
+    parser.add_argument('--no-verify', action='store_true',
+                        help='不验证clip目录是否存在（默认会验证）')
     
     args = parser.parse_args()
     
@@ -190,7 +222,8 @@ def main():
         return
     
     # 1. 收集所有 clips
-    clips = collect_clips(args.meta_root)
+    clips = collect_clips(args.meta_root, output_root=args.output_root, 
+                         verify_clips=not args.no_verify)
     
     if len(clips) == 0:
         print("[WARN] 未找到任何 clips")
