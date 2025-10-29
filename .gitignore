@@ -29,3 +29,4 @@ ENV/
 # 实验和日志
 experiments/logs/
 *.tb_log
+InsightErrorLog
