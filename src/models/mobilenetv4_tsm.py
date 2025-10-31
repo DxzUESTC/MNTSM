@@ -11,7 +11,7 @@ except ImportError:
     TIMM_AVAILABLE = False
     print("Warning: timm not available, cannot load MobileNetV4 from timm")
 
-from .tsm import TemporalShift, TSMConv2d, insert_tsm_to_module, make_tsm_conv2d
+from .tsm import TemporalShift, TSMConv2d, insert_tsm_to_module, make_tsm_conv2d, insert_tsm_residual_shift, insert_tsm_after_expansion
 
 
 class MNTSMModel(nn.Module):
@@ -32,10 +32,12 @@ class MNTSMModel(nn.Module):
             - 'middle': 在中间层插入（推荐用于中层特征融合）
             - 'late': 在后期层插入（推荐用于深层特征融合）
             - 层名称列表: 直接指定要插入TSM的层名称（如 ['conv1', 'layer2.0.conv1']）
-            - None: 使用默认策略（在所有瓶颈层插入）
+            - None: 使用默认策略（倒残差升维后、depthwise前）
         mode (str): TSM集成模式
-            - 'replace': 替换指定层为TSM版本（默认）
-            - 'insert': 在指定层前插入TSM模块
+            - 'default': 在倒残差块的升维后、depthwise前插入（推荐，等效于“Expansion后插入TSM”）
+            - 'residual': 残差移位（仅在可残差连接的块里优先替换depthwise）
+            - 'replace': 替换指定层为TSM版本（结合 tsm_locations 使用）
+            - 'insert': 在指定层前插入TSM模块（占位，当前未实现专用包装）
     
     输入形状: (N*T, C, H, W)，其中N为batch size，T为n_segment
     输出形状: (N*T, C_out, H_out, W_out)
@@ -51,7 +53,7 @@ class MNTSMModel(nn.Module):
     """
     
     def __init__(self, backbone, n_segment=8, fold_div=8, 
-                 tsm_locations=None, mode='replace'):
+                 tsm_locations=None, mode='default'):
         super().__init__()
         self.backbone = backbone
         self.n_segment = n_segment
@@ -61,17 +63,30 @@ class MNTSMModel(nn.Module):
         if tsm_locations is not None:
             self._insert_tsm(tsm_locations, mode)
         else:
-            # 默认策略：在所有Conv2d层插入TSM（可以根据需要调整）
-            self._insert_tsm_default()
+            # 默认策略：升维后、depthwise前插入（等效于在depthwise前做TSM）
+            self._insert_tsm_default(mode)
     
-    def _insert_tsm(self, locations, mode='replace'):
+    def _insert_tsm(self, locations, mode='default'):
         """在指定位置插入TSM
         
         Args:
             locations: TSM插入位置列表
             mode: 'replace' 或 'insert'
         """
-        if mode == 'replace':
+        if mode == 'default':
+            # 无需 locations，按默认策略插入
+            insert_tsm_after_expansion(
+                self.backbone,
+                n_segment=self.n_segment,
+                fold_div=self.fold_div,
+            )
+        elif mode == 'residual':
+            insert_tsm_residual_shift(
+                self.backbone,
+                n_segment=self.n_segment,
+                fold_div=self.fold_div,
+            )
+        elif mode == 'replace':
             # 替换模式：将指定层替换为TSM版本
             if isinstance(locations, list) and all(isinstance(loc, str) for loc in locations):
                 # 如果是层名称列表
@@ -90,23 +105,23 @@ class MNTSMModel(nn.Module):
             # 插入模式：在指定层前插入TSM模块
             self._insert_tsm_before_layers(locations)
     
-    def _insert_tsm_default(self):
-        """默认TSM插入策略：在关键瓶颈层插入"""
-        # 查找所有卷积层并替换为TSM版本
-        # 注意：这里可以选择性地只替换部分关键层，而不是全部
-        conv_count = 0
-        for name, module in self.backbone.named_modules():
-            if isinstance(module, nn.Conv2d) and 'conv' in name.lower():
-                # 可以根据需要筛选特定的层
-                # 例如：只在bottleneck或depthwise卷积中插入
-                if conv_count % 2 == 0:  # 每隔一个插入（可根据需要调整）
-                    parent = self._get_parent_module(name)
-                    if parent is not None:
-                        parts = name.split('.')
-                        attr_name = parts[-1]
-                        tsm_conv = TSMConv2d(module, n_segment=self.n_segment, fold_div=self.fold_div)
-                        setattr(parent, attr_name, tsm_conv)
-                        conv_count += 1
+    def _insert_tsm_default(self, mode='default'):
+        """默认TSM插入策略：
+        - default: 在倒残差块的升维后、depthwise前插入
+        - residual: 残差移位
+        """
+        if mode == 'residual':
+            insert_tsm_residual_shift(
+                self.backbone,
+                n_segment=self.n_segment,
+                fold_div=self.fold_div,
+            )
+        else:
+            insert_tsm_after_expansion(
+                self.backbone,
+                n_segment=self.n_segment,
+                fold_div=self.fold_div,
+            )
     
     def _insert_tsm_by_labels(self, labels):
         """根据位置标签插入TSM

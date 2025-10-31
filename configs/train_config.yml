@@ -1,0 +1,71 @@
+# 训练配置（适配 2060S 8GB + 数据不平衡 15万假/3万真）
+
+exp_name: MNTSM_ResShift_MBV4_Opt
+seed: 42
+use_gpu: true
+amp: false               # FP16 梯度在 MobileNet + TSM 中传播时易 underflow，尤其是 small backbone + BCE Loss
+resume_from: none        # none 或可填入 checkpoint 路径以断点恢复
+
+# 数据
+data_root: data
+index_path: data/dataset_index.pkl
+dataset_name: FFPP        # 仅使用 FFPP 数据集
+val_ratio: 0.10          # 验证集 10%
+test_ratio: 0.10         # 测试集 10%
+split_cache_path: data/splits/FFPP_split_42.pkl  # 数据集划分缓存路径（基于视频级划分）
+batch_size: 32            # 输入恢复224，适当降低batch以避免OOM
+num_workers: 1            # Windows 下建议 0 以避免共享内存错误 1455
+force_single_worker: true
+prefetch_factor: 2        # 多进程时再调高；单进程下无效
+persistent_workers: false  # 仅多进程有意义，单进程关闭
+use_fast_io: true         # Windows: 使用 np.fromfile+cv2.imdecode 提升读取稳定性
+allow_skip: true
+
+# 采样器：balanced 使用 WeightedRandomSampler 平衡每个 batch 的类别
+sampler:
+  type: balanced          # 启用 WeightedRandomSampler（每batch类别平衡）
+
+# 模型与 TSM
+model_name: mobilenetv4_conv_small_050.e3000_r224_in1k   # 参考 baseline.md，小体量(≈2.24M)且有预训练
+n_segment: 8              # 请确保与预处理的 clip_len 一致
+fold_div: 4
+pretrained: true
+aggregate: attention      # mean / max / attention（轻量注意力聚合）
+input_size: 224           # 恢复到224，与预训练权重更匹配
+
+# 优化
+loss: focal_bce           # focal_bce / bce / ce
+class_balance:
+  auto_pos_weight: true   # 动态计算 pos_weight = sqrt(neg/pos)
+  gamma: 2.0
+lr: 0.0003
+weight_decay: 0.01
+epochs: 50
+optimizer: adamw
+lr_scheduler:
+  type: cosine
+  warmup_epochs: 3
+  min_lr: 0.00003
+
+# 早停配置
+early_stop:
+  metric: video_auc      # 监控验证集指标（与日志键一致）
+  mode: max              # 指标越大越好
+  patience: 10
+  min_delta: 0.002
+
+# 日志/可视化/检查点
+log_dir: experiments/logs
+tensorboard: true
+console_log: true        # 同步日志到终端输出
+overwrite_log: false      # 每次运行覆盖旧日志，避免历史不一致编码造成乱码
+wandb:
+  enable: false
+  project: MNTSM
+  run_name: mntsm-run
+ckpt_dir: experiments/checkpoints
+
+
+# 额外稳定性开关
+grad_accum_steps: 2
+freeze_bn: true

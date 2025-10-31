@@ -183,3 +183,117 @@ def insert_tsm_to_module(module, n_segment=8, fold_div=8, layer_names=None):
                 # 替换为TSM版本
                 tsm_conv = TSMConv2d(child, n_segment=n_segment, fold_div=fold_div)
                 setattr(parent, attr_name, tsm_conv)
+
+
+def insert_tsm_residual_shift(module, n_segment=8, fold_div=8):
+    """在残差分支内插入TSM（残差移位）
+    
+    策略:
+    - 遍历子模块，检测类似 MobileNetV2/V3/V4 风格的倒残差块（存在 use_res_connect=True）。
+    - 优先在块内的 depthwise 卷积（groups==in_channels）前加入 TSM（即用 TSMConv2d 替换该卷积）。
+    - 若未找到深度卷积，则回退为替换该块内遇到的第一个 Conv2d。
+    - 仅作用于残差可连接的块（use_res_connect 为 True），从而保证是残差分支内的移位。
+    
+    说明:
+    - 这种做法符合原TSM论文的“残差移位”建议，即把时序移动放在残差分支中。
+    - 对未知结构的块，采用启发式检测 depthwise -> fallback first conv 的方式。
+    """
+    for _, block in module.named_children():
+        # 先递归到更深层，确保嵌套结构也能处理
+        insert_tsm_residual_shift(block, n_segment=n_segment, fold_div=fold_div)
+
+        # 仅在存在残差连接标记的模块中处理
+        if hasattr(block, 'use_res_connect') and bool(getattr(block, 'use_res_connect')):
+            depthwise_target = None
+            first_conv_target = None
+            depthwise_parent = None
+            first_conv_parent = None
+            depthwise_attr = None
+            first_conv_attr = None
+
+            # 遍历该 block 的直接和嵌套子层，优先找到 depthwise 卷积
+            for name, sub in block.named_modules():
+                if isinstance(sub, nn.Conv2d):
+                    # 记录第一个卷积
+                    if first_conv_target is None:
+                        # 找到父模块
+                        parent = block
+                        parts = name.split('.')
+                        for part in parts[:-1]:
+                            parent = getattr(parent, part)
+                        first_conv_target = sub
+                        first_conv_parent = parent
+                        first_conv_attr = parts[-1]
+
+                    # 检测 depthwise：groups==in_channels
+                    if sub.groups == sub.in_channels:
+                        parent = block
+                        parts = name.split('.')
+                        for part in parts[:-1]:
+                            parent = getattr(parent, part)
+                        depthwise_target = sub
+                        depthwise_parent = parent
+                        depthwise_attr = parts[-1]
+                        # 已找到depthwise，可停止进一步搜寻以确保“第一个”depthwise
+                        break
+
+            # 进行替换：优先替换 depthwise，否则替换第一个卷积
+            if depthwise_target is not None:
+                setattr(
+                    depthwise_parent,
+                    depthwise_attr,
+                    TSMConv2d(depthwise_target, n_segment=n_segment, fold_div=fold_div),
+                )
+            elif first_conv_target is not None:
+                setattr(
+                    first_conv_parent,
+                    first_conv_attr,
+                    TSMConv2d(first_conv_target, n_segment=n_segment, fold_div=fold_div),
+                )
+
+
+def insert_tsm_after_expansion(module, n_segment=8, fold_div=8):
+    """在倒残差块的1x1升维卷积之后、3x3 depthwise卷积之前插入TSM
+
+    非递归实现：首先收集所有 depthwise Conv2d 的完整路径，再统一替换为 TSMConv2d，避免在遍历过程中修改模块层级导致的循环引用或深递归。
+
+    Args:
+        module (nn.Module): 模型根模块
+        n_segment (int): 时序片段数量
+        fold_div (int): 参与移动的通道比例
+    """
+    # 第一遍：收集待替换目标（完整路径、父模块、属性名、原层）
+    targets = []
+    for name, child in module.named_modules():
+        if not name:
+            continue
+        if isinstance(child, nn.Conv2d) and child.groups == child.in_channels:
+            parts = name.split('.')
+            parent = module
+            ok = True
+            for part in parts[:-1]:
+                if not hasattr(parent, part):
+                    ok = False
+                    break
+                parent = getattr(parent, part)
+            if not ok:
+                continue
+            attr = parts[-1]
+            try:
+                current = getattr(parent, attr)
+            except Exception:
+                continue
+            # 跳过已经替换过的层
+            if isinstance(current, TSMConv2d):
+                continue
+            # 仅当当前位置仍是 Conv2d 且满足 depthwise 条件时加入
+            if isinstance(current, nn.Conv2d) and current.groups == current.in_channels:
+                targets.append((parent, attr, current))
+
+    # 第二遍：执行替换
+    for parent, attr, conv in targets:
+        try:
+            setattr(parent, attr, TSMConv2d(conv, n_segment=n_segment, fold_div=fold_div))
+        except Exception:
+            # 忽略个别不可替换项，继续后续替换，避免中途失败
+            pass
