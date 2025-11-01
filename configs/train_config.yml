@@ -4,7 +4,7 @@ exp_name: MNTSM_ResShift_MBV4_Opt
 seed: 42
 use_gpu: true
 amp: false               # FP16 梯度在 MobileNet + TSM 中传播时易 underflow，尤其是 small backbone + BCE Loss
-resume_from: none        # none 或可填入 checkpoint 路径以断点恢复
+resume_from: D:\Share\MNTSM_Project\MNTSM\experiments\checkpoints\FFPP\last.pth        # none 或可填入 checkpoint 路径以断点恢复
 
 # 数据
 data_root: data

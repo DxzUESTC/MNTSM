@@ -552,7 +552,11 @@ def train_from_config(config_path: str):
                 if 'scaler_state' in ckpt and scaler is not None:
                     scaler.load_state_dict(ckpt['scaler_state'])
                 start_epoch = int(ckpt.get('epoch', 0))
-                best_auc = float(ckpt.get('metrics', {}).get('video_auc', best_auc))
+                # 优先使用保存的 best_auc，否则使用当前epoch的 metrics
+                if 'best_auc' in ckpt:
+                    best_auc = float(ckpt['best_auc'])
+                else:
+                    best_auc = float(ckpt.get('metrics', {}).get('video_auc', best_auc))
                 # 恢复早停状态
                 if 'best_metric' in ckpt:
                     best_metric = float(ckpt['best_metric'])
@@ -573,11 +577,37 @@ def train_from_config(config_path: str):
                         'optimizer_state': ckpt.get('optimizer_state'),
                         'scaler_state': ckpt.get('scaler_state'),
                         'config': ckpt.get('config'),
-                        'metrics': ckpt.get('metrics', {})
+                        'metrics': ckpt.get('metrics', {}),
+                        'best_auc': best_auc
                     }
                 logger.info(f"Resumed from: {resume_path} (epoch={start_epoch}, best_auc={best_auc}, best_metric={best_metric}, epochs_no_improve={epochs_no_improve})")
             except Exception as e:
                 logger.warning(f"Failed to resume from {resume_path}: {e}")
+        
+        # 尝试加载历史最佳检查点（如果存在且还未加载）
+        if best_ckpt_state is None:
+            best_ckpt_path = os.path.join(ckpt_dir, 'best.pth')
+            if os.path.isfile(best_ckpt_path):
+                try:
+                    best_ckpt = torch.load(best_ckpt_path, map_location=device)
+                    best_ckpt_state = {
+                        'epoch': best_ckpt.get('epoch', 0),
+                        'model_state': best_ckpt.get('model_state', {}),
+                        'optimizer_state': best_ckpt.get('optimizer_state'),
+                        'scaler_state': best_ckpt.get('scaler_state'),
+                        'config': best_ckpt.get('config'),
+                        'metrics': best_ckpt.get('metrics', {})
+                    }
+                    if scheduler is not None and 'scheduler_state' in best_ckpt:
+                        best_ckpt_state['scheduler_state'] = best_ckpt['scheduler_state']
+                    # 同步 best_auc 到历史最佳值
+                    historical_best_auc = best_ckpt.get('best_auc', best_ckpt_state['metrics'].get('video_auc', -1.0))
+                    if historical_best_auc > best_auc:
+                        best_auc = historical_best_auc
+                    best_ckpt_state['best_auc'] = historical_best_auc
+                    logger.info(f"Loaded historical best checkpoint from {best_ckpt_path} (epoch={best_ckpt_state['epoch']}, video_auc={historical_best_auc:.4f})")
+                except Exception as e:
+                    logger.warning(f"Failed to load best checkpoint from {best_ckpt_path}: {e}")
 
         grad_accum_steps = int(config.get('grad_accum_steps', 1))
         # 可选：冻结早期BN，缓解小batch/不平衡导致的统计漂移
@@ -629,6 +659,7 @@ def train_from_config(config_path: str):
                 'scaler_state': scaler.state_dict() if scaler is not None else None,
                 'config': config,
                 'metrics': metrics,
+                'best_auc': best_auc,
                 'best_metric': best_metric,
                 'epochs_no_improve': epochs_no_improve
             }
@@ -645,6 +676,7 @@ def train_from_config(config_path: str):
                     'scaler_state': scaler.state_dict() if scaler is not None else None,
                     'config': config,
                     'metrics': metrics,
+                    'best_auc': best_auc,
                     'best_metric': best_metric,
                     'epochs_no_improve': epochs_no_improve
                 }
