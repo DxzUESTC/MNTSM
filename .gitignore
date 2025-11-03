@@ -1,5 +1,6 @@
 # 数据目录
 /data
+/ablation
 
 # Python 缓存文件
 __pycache__/

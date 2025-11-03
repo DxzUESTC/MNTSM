@@ -521,6 +521,70 @@ def train_from_config(config_path: str):
         model, criterion, optimizer, scheduler = build_model_and_optim(config, device, class_counts=class_counts)
         n_segment = config.get('n_segment', 8)
 
+        # 记录超参数和关键参数
+        hyperparams = {
+            "实验配置": {
+                "实验名称": config.get('exp_name', 'MNTSM'),
+                "随机种子": config.get('seed', 42),
+                "设备": str(device),
+                "数据集": config.get('dataset_name', 'All'),
+                "训练epochs": config.get('epochs', 10),
+            },
+            "数据配置": {
+                "数据根目录": config.get('data_root', 'data'),
+                "batch_size": config.get('batch_size', 8),
+                "num_workers": config.get('num_workers', 4),
+                "n_segment": n_segment,
+                "input_size": config.get('input_size', 224),
+                "val_ratio": config.get('val_ratio', 0.1),
+                "test_ratio": config.get('test_ratio', 0.1),
+            },
+            "模型配置": {
+                "model_name": config.get('model_name', 'mobilenetv4'),
+                "pretrained": config.get('pretrained', True),
+                "fold_div": config.get('fold_div', 8),
+                "n_segment": n_segment,
+                "aggregate": config.get('aggregate', 'mean'),
+            },
+            "优化配置": {
+                "优化器": config.get('optimizer', 'adamw'),
+                "学习率": config.get('lr', 1e-3),
+                "权重衰减": config.get('weight_decay', 0.0),
+                "loss": config.get('loss', 'bce'),
+                "grad_accum_steps": config.get('grad_accum_steps', 1),
+            },
+            "学习率调度": {
+                "type": config.get('lr_scheduler', {}).get('type', 'none') if isinstance(config.get('lr_scheduler'), dict) else 'none',
+                "warmup_epochs": config.get('lr_scheduler', {}).get('warmup_epochs', 0) if isinstance(config.get('lr_scheduler'), dict) else 0,
+                "min_lr": config.get('lr_scheduler', {}).get('min_lr', 0.0) if isinstance(config.get('lr_scheduler'), dict) else 0.0,
+            },
+            "类别平衡": {
+                "auto_pos_weight": config.get('class_balance', {}).get('auto_pos_weight', False) if isinstance(config.get('class_balance'), dict) else (config.get('class_balance', False) if isinstance(config.get('class_balance'), bool) else False),
+                "gamma": config.get('class_balance', {}).get('gamma', 2.0) if isinstance(config.get('class_balance'), dict) else 2.0,
+            },
+            "训练策略": {
+                "amp": config.get('amp', True) and device.type == 'cuda',
+                "freeze_bn": config.get('freeze_bn', False),
+                "drop_last": True,  # 通常DataLoader都设置为True
+            },
+            "早停配置": {
+                "metric": config.get('early_stop', {}).get('metric', 'video_auc') if isinstance(config.get('early_stop'), dict) else 'video_auc',
+                "mode": config.get('early_stop', {}).get('mode', 'max') if isinstance(config.get('early_stop'), dict) else 'max',
+                "patience": int(config.get('early_stop', {}).get('patience', 8) if isinstance(config.get('early_stop'), dict) else 8),
+                "min_delta": float(config.get('early_stop', {}).get('min_delta', 1e-3) if isinstance(config.get('early_stop'), dict) else 1e-3),
+            },
+            "数据集统计": {
+                "训练clips": len(train_loader.dataset),
+                "验证clips": len(val_loader.dataset),
+                "测试clips": len(test_loader.dataset),
+                "训练集real": class_counts.get('real', 0),
+                "训练集fake": class_counts.get('fake', 0),
+            }
+        }
+        
+        logger.log_hyperparameters(hyperparams, "训练超参数与关键配置")
+        logger.log_model_info(model, optimizer, scheduler)
+
         # 训练循环
         epochs = config.get('epochs', 10)
         ckpt_dir = config.get('ckpt_dir', 'experiments/checkpoints')

@@ -46,11 +46,11 @@ def process_single_video(args):
     """处理单个视频（用于多进程）
     
     Args:
-        args: (video_path, output_root, raw_root, fps, clip_len, stride, use_gpu)
+        args: (video_path, output_root, raw_root, fps, clip_len, stride, use_gpu, face_size)
     Returns:
         (video_path, success, message)
     """
-    video_path, output_root, raw_root, fps, clip_len, stride, use_gpu = args
+    video_path, output_root, raw_root, fps, clip_len, stride, use_gpu, face_size = args
     
     try:
         # 每个进程创建自己的 detector
@@ -63,7 +63,8 @@ def process_single_video(args):
             fps=fps,
             clip_len=clip_len,
             raw_root=raw_root,
-            stride=stride
+            stride=stride,
+            face_size=face_size
         )
         
         if status == 'failed':
@@ -80,7 +81,7 @@ def process_single_video(args):
 
 def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None, 
                   use_gpu=True, num_workers=3, filter_pattern=None, extensions=None, 
-                  skip_processed=True):
+                  skip_processed=True, face_size=112):
     """批量处理视频数据集
     
     Args:
@@ -94,6 +95,7 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
         filter_pattern: 可选的路径过滤模式（例如 'deepfakes' 只处理包含该字符串的路径）
         extensions: 支持的视频文件扩展名列表
         skip_processed: 是否跳过已处理的视频（实现断点续传）
+        face_size: 人脸对齐后的尺寸（默认 112，可设置为 224 等更高分辨率）
     """
     print(f"[INFO] 收集视频文件: {raw_root}")
     if extensions is None:
@@ -133,7 +135,8 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
                         clip_len=clip_len,
                         raw_root=raw_root,
                         stride=stride,
-                        skip_if_processed=skip_processed
+                        skip_if_processed=skip_processed,
+                        face_size=face_size
                     )
                     
                     if status == 'skipped':
@@ -156,7 +159,7 @@ def batch_process(raw_root, output_root, fps=4, clip_len=8, stride=None,
     else:
         # 多进程模式（不推荐，可能导致GPU竞争）
         print(f"[WARN] 使用多进程模式 ({num_workers} 进程)，可能导致GPU资源竞争")
-        tasks = [(v, output_root, raw_root, fps, clip_len, stride, use_gpu) 
+        tasks = [(v, output_root, raw_root, fps, clip_len, stride, use_gpu, face_size) 
                  for v in video_paths]
         
         success_count = 0
@@ -236,6 +239,8 @@ def main():
                         help='路径过滤模式 (会覆盖配置文件中的设置)')
     parser.add_argument('--no-skip', action='store_true',
                         help='不跳过已处理的视频（默认会跳过以实现断点续传）')
+    parser.add_argument('--face_size', type=int, default=None,
+                        help='人脸对齐后的尺寸 (默认 112，可设置为 224 等更高分辨率，会覆盖配置文件中的设置)')
     
     args = parser.parse_args()
     
@@ -253,6 +258,7 @@ def main():
     fps = args.fps if args.fps is not None else config.get('video', {}).get('fps', 4)
     clip_len = args.clip_len if args.clip_len is not None else config.get('video', {}).get('clip_len', 8)
     stride = args.stride if args.stride is not None else config.get('video', {}).get('stride')
+    face_size = args.face_size if args.face_size is not None else config.get('video', {}).get('face_size', 112)
     num_workers = args.num_workers if args.num_workers is not None else config.get('device', {}).get('num_workers', 2)
     filter_pattern = args.filter if args.filter is not None else config.get('filter', {}).get('pattern')
     extensions = tuple(config.get('extensions', ['.mp4', '.avi', '.mov', '.mkv']))
@@ -291,6 +297,7 @@ def main():
     print(f"  FPS: {fps}")
     print(f"  Clip长度: {clip_len}")
     print(f"  步长: {stride if stride else '自动(clip_len // 2)'}")
+    print(f"  人脸尺寸: {face_size}x{face_size}")
     print(f"  使用GPU: {use_gpu}")
     print(f"  并行进程数: {num_workers}")
     if filter_pattern:
@@ -308,7 +315,8 @@ def main():
         num_workers=num_workers,
         filter_pattern=filter_pattern,
         extensions=extensions,
-        skip_processed=skip_processed
+        skip_processed=skip_processed,
+        face_size=face_size
     )
 
 

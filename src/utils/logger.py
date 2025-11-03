@@ -122,6 +122,137 @@ class ExperimentLogger:
         except Exception:
             pass
 
+    def log_hyperparameters(self, hyperparams: dict, section_name: str = "训练超参数"):
+        """记录训练的超参数和关键参数
+        
+        Args:
+            hyperparams: 超参数字典，键为参数名，值为参数值
+            section_name: 章节名称，用于标识不同的超参数组
+        """
+        try:
+            self.info("=" * 80)
+            self.info(f"{section_name}:")
+            self.info("-" * 80)
+            
+            # 按类别分组显示（如果有嵌套字典）
+            if isinstance(hyperparams, dict):
+                for key, value in hyperparams.items():
+                    if isinstance(value, dict):
+                        # 嵌套字典，显示子标题
+                        self.info(f"\n  [{key}]:")
+                        for sub_key, sub_value in value.items():
+                            formatted_value = self._format_hyperparameter_value(sub_value)
+                            self.info(f"    {sub_key}: {formatted_value}")
+                    else:
+                        formatted_value = self._format_hyperparameter_value(value)
+                        self.info(f"  {key}: {formatted_value}")
+            
+            self.info("=" * 80)
+            
+            # 同时记录到TensorBoard和W&B
+            if self.tb is not None:
+                self.tb.add_text(section_name, self._dict_to_markdown(hyperparams))
+            
+            if self.wandb is not None:
+                # W&B会自动记录config，这里额外记录为超参数
+                flat_params = self._flatten_dict(hyperparams)
+                self.wandb.config.update(flat_params)
+                
+        except Exception as e:
+            self.warning(f"记录超参数失败: {e}")
+
+    def _format_hyperparameter_value(self, value):
+        """格式化超参数值以便显示"""
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and abs(value) < 0.001:
+                return f"{value:.6e}"
+            elif isinstance(value, float):
+                return f"{value:.6f}"
+            else:
+                return str(value)
+        elif isinstance(value, bool):
+            return str(value)
+        elif isinstance(value, (list, tuple)):
+            if len(value) > 10:
+                return f"{value[:5]} ... ({len(value)} items)"
+            return str(value)
+        elif value is None:
+            return "None"
+        else:
+            return str(value)
+
+    def _dict_to_markdown(self, d: dict, indent: int = 0) -> str:
+        """将字典转换为Markdown格式字符串"""
+        lines = []
+        prefix = "  " * indent
+        for key, value in d.items():
+            if isinstance(value, dict):
+                lines.append(f"{prefix}**{key}**:")
+                lines.append(self._dict_to_markdown(value, indent + 1))
+            else:
+                formatted_value = self._format_hyperparameter_value(value)
+                lines.append(f"{prefix}- **{key}**: {formatted_value}")
+        return "\n".join(lines)
+
+    def _flatten_dict(self, d: dict, parent_key: str = "", sep: str = ".") -> dict:
+        """展平嵌套字典"""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    def log_model_info(self, model, optimizer=None, scheduler=None):
+        """记录模型、优化器和调度器的详细信息"""
+        try:
+            self.info("=" * 80)
+            self.info("模型信息:")
+            self.info("-" * 80)
+            
+            # 模型参数统计
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            
+            self.info(f"  总参数量: {total_params:,} ({total_params/1e6:.2f}M)")
+            self.info(f"  可训练参数量: {trainable_params:,} ({trainable_params/1e6:.2f}M)")
+            self.info(f"  冻结参数量: {(total_params - trainable_params):,}")
+            
+            # 模型名称/类型
+            model_name = model.__class__.__name__
+            self.info(f"  模型类型: {model_name}")
+            
+            # 优化器信息
+            if optimizer is not None:
+                self.info(f"\n优化器信息:")
+                opt_name = optimizer.__class__.__name__
+                self.info(f"  类型: {opt_name}")
+                if hasattr(optimizer, 'param_groups') and len(optimizer.param_groups) > 0:
+                    lr = optimizer.param_groups[0].get('lr', 'N/A')
+                    weight_decay = optimizer.param_groups[0].get('weight_decay', 'N/A')
+                    self.info(f"  学习率: {lr}")
+                    self.info(f"  权重衰减: {weight_decay}")
+            
+            # 调度器信息
+            if scheduler is not None:
+                self.info(f"\n学习率调度器:")
+                sched_name = scheduler.__class__.__name__
+                self.info(f"  类型: {sched_name}")
+                if hasattr(scheduler, 'last_epoch'):
+                    self.info(f"  当前epoch: {scheduler.last_epoch}")
+            
+            self.info("=" * 80)
+            
+            # 记录到TensorBoard
+            if self.tb is not None:
+                self.tb.add_scalar('model/total_params', total_params, 0)
+                self.tb.add_scalar('model/trainable_params', trainable_params, 0)
+            
+        except Exception as e:
+            self.warning(f"记录模型信息失败: {e}")
+
     def log_dataset_summary(self, train_count: int, val_count: int, class_counts: dict = None):
         try:
             self.info("数据集摘要:")

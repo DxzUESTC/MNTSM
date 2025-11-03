@@ -35,10 +35,11 @@ def create_face_detector(use_gpu=True):
 
 
 def compute_face_feature(aligned_face):
-    """计算对齐人脸的局部区域 L1 差分特征（替代简单灰度降采样）
+    """计算对齐人脸的局部区域特征（替代简单灰度降采样）
     
-    将 112x112 对齐人脸划分为 4x4 区域，计算每个区域的均值和方差，再计算相邻区域间的 L1 差分。
+    将对齐人脸图像划分为 4x4 区域，计算每个区域的均值和方差。
     返回 32 维特征向量（16 个区域均值 + 16 个方差）。
+    支持任意尺寸的对齐人脸（自动适配）。
     """
     gray = cv2.cvtColor(aligned_face, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     h, w = gray.shape
@@ -109,7 +110,7 @@ def is_video_processed(video_path, output_root, raw_root=None):
 
 
 def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=None, stride=None, 
-                skip_if_processed=False):
+                skip_if_processed=False, face_size=112):
     """
     从视频生成可训练的 clip（抽帧 -> 对齐 -> 关键帧选择 -> 滑窗生成多 clip）
     输出会镜像 raw_root 下的视频相对路径。
@@ -128,6 +129,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
       - raw_root: raw_videos 的根目录，用于保持目录结构（例如 data/raw_videos）
       - stride: 滑窗步长（默认为 clip_len // 2，即 50% 重叠）
       - skip_if_processed: 如果视频已处理过是否跳过
+      - face_size: 人脸对齐后的尺寸（默认 112，可设置为 224 等更高分辨率）
     返回:
       - (meta dict, status): meta信息和状态('processed'/'skipped'/'failed')
     """
@@ -221,7 +223,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
             img = cv2.imread(fp)
             if img is None:
                 continue
-            aligned = align_face(img, detector=detector, output_size=112)
+            aligned = align_face(img, detector=detector, output_size=face_size)
             if aligned is None:
                 # 若检测/对齐失败，跳过该帧
                 continue
@@ -336,6 +338,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
             "fps": fps,
             "clip_len": clip_len,
             "stride": stride,
+            "face_size": face_size,
             "num_extracted_frames": len(frame_files),
             "num_aligned_frames": num_aligned,
             "num_clips": len(clips_info),

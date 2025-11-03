@@ -11,6 +11,7 @@ video:
   fps: 4            # 抽帧帧率
   clip_len: 8       # 每个clip的帧数
   stride: null      # 滑窗步长 (null表示使用 clip_len // 2)
+  face_size: 112    # 人脸对齐后的尺寸 (可设置为 224 等更高分辨率)
 
 # 扩展名过滤
 extensions:
