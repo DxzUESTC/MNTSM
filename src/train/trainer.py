@@ -409,6 +409,7 @@ def build_model_and_optim(config, device, class_counts=None):
     n_segment = config.get('n_segment', 8)
     fold_div = config.get('fold_div', 8)
     pretrained = config.get('pretrained', True)
+    cache_dir = config.get('model_cache_dir', None)  # 从配置读取缓存目录
 
     # 确定分类头输出维度
     loss_type = config.get('loss', 'bce')  # 'focal_bce' / 'bce' / 'ce'
@@ -423,6 +424,7 @@ def build_model_and_optim(config, device, class_counts=None):
         n_segment=n_segment,
         fold_div=fold_div,
         num_classes=num_classes,
+        cache_dir=cache_dir,  # 传递缓存目录
     )
     model = model.to(device)
 
@@ -624,8 +626,26 @@ def train_from_config(config_path: str):
                 # 恢复早停状态
                 if 'best_metric' in ckpt:
                     best_metric = float(ckpt['best_metric'])
+                else:
+                    # 如果没有保存 best_metric，使用 best_auc 作为初始值（如果早停指标是 video_auc）
+                    if es_metric == 'video_auc':
+                        best_metric = best_auc
+                    else:
+                        best_metric = float(ckpt.get('metrics', {}).get(es_metric, best_metric))
+                # 确保 best_metric 和 best_auc 同步（如果早停指标是 video_auc）
+                if es_metric == 'video_auc' and best_auc > best_metric:
+                    best_metric = best_auc
                 if 'epochs_no_improve' in ckpt:
                     epochs_no_improve = int(ckpt['epochs_no_improve'])
+                # 如果配置中指定了 reset_patience，则重置patience计数器以继续训练
+                if config.get('reset_patience_on_resume', False):
+                    logger.info(f"Resetting patience counter (was {epochs_no_improve}) to continue training.")
+                    epochs_no_improve = 0
+                # 如果配置中指定了初始patience值，则使用该值（优先级高于reset_patience_on_resume）
+                initial_patience = config.get('initial_patience_on_resume', None)
+                if initial_patience is not None:
+                    logger.info(f"Setting initial patience counter to {initial_patience} (was {epochs_no_improve}).")
+                    epochs_no_improve = int(initial_patience)
                 # 恢复调度器状态
                 if scheduler is not None and 'scheduler_state' in ckpt:
                     try:
@@ -668,6 +688,12 @@ def train_from_config(config_path: str):
                     historical_best_auc = best_ckpt.get('best_auc', best_ckpt_state['metrics'].get('video_auc', -1.0))
                     if historical_best_auc > best_auc:
                         best_auc = historical_best_auc
+                    # 同步 best_metric（如果早停指标是 video_auc）
+                    historical_best_metric = best_ckpt.get('best_metric', historical_best_auc if es_metric == 'video_auc' else best_ckpt_state['metrics'].get(es_metric, best_metric))
+                    if es_metric == 'video_auc' and historical_best_auc > best_metric:
+                        best_metric = historical_best_auc
+                    elif es_metric != 'video_auc' and historical_best_metric != best_metric:
+                        best_metric = historical_best_metric
                     best_ckpt_state['best_auc'] = historical_best_auc
                     logger.info(f"Loaded historical best checkpoint from {best_ckpt_path} (epoch={best_ckpt_state['epoch']}, video_auc={historical_best_auc:.4f})")
                 except Exception as e:
@@ -675,12 +701,17 @@ def train_from_config(config_path: str):
 
         grad_accum_steps = int(config.get('grad_accum_steps', 1))
         # 可选：冻结早期BN，缓解小batch/不平衡导致的统计漂移
-        if bool(config.get('freeze_bn', False)):
+        # 注意：仅在首次训练时应用冻结逻辑，恢复训练时保持检查点中的状态
+        if bool(config.get('freeze_bn', False)) and start_epoch == 0:
+            logger.info("Freezing BatchNorm layers for training stability.")
             for m in model.modules():
                 if isinstance(m, nn.BatchNorm2d):
                     m.eval()
                     for p in m.parameters(recurse=False):
                         p.requires_grad = False
+        elif start_epoch > 0:
+            # 恢复训练时，确保模型处于训练模式（如果之前被冻结，现在保持训练状态）
+            model.train()
 
         # 如果从断点恢复且调度器存在但未恢复状态，需要手动同步到正确epoch
         if scheduler is not None and start_epoch > 0:
@@ -730,9 +761,30 @@ def train_from_config(config_path: str):
             if scheduler is not None:
                 checkpoint_data['scheduler_state'] = scheduler.state_dict()
             save_checkpoint(checkpoint_data, ckpt_dir, 'last.pth')
+            
+            # 保存每个epoch的检查点
+            save_checkpoint(checkpoint_data, ckpt_dir, f'epoch_{epoch}.pth')
 
+            # 早停逻辑（在保存最佳模型之前执行，确保 best_metric 和 best_auc 同步）
+            cur = metrics.get(es_metric)
+            if cur is not None and es_patience > 0:
+                improved = (cur > best_metric + es_min_delta) if es_mode == 'max' else (cur < best_metric - es_min_delta)
+                if improved:
+                    best_metric = cur
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    if epochs_no_improve >= es_patience:
+                        logger.info(f"Early stopping at epoch {epoch}: no improvement in {es_patience} epochs on {es_metric}.")
+                        break
+            
+            # 保存最佳模型（使用 best_metric 同步更新 best_auc，确保两者一致）
+            # 如果早停指标是 video_auc，则 best_metric 和 best_auc 应该保持一致
             if metrics.get('video_auc', -1) > best_auc:
                 best_auc = metrics['video_auc']
+                # 如果早停指标是 video_auc，同步更新 best_metric
+                if es_metric == 'video_auc' and cur is not None:
+                    best_metric = cur
                 best_ckpt_state = {
                     'epoch': epoch,
                     'model_state': model.state_dict(),
@@ -747,19 +799,6 @@ def train_from_config(config_path: str):
                 if scheduler is not None:
                     best_ckpt_state['scheduler_state'] = scheduler.state_dict()
                 save_checkpoint(best_ckpt_state, ckpt_dir, 'best.pth')
-
-            # 早停逻辑
-            cur = metrics.get(es_metric)
-            if cur is not None and es_patience > 0:
-                improved = (cur > best_metric + es_min_delta) if es_mode == 'max' else (cur < best_metric - es_min_delta)
-                if improved:
-                    best_metric = cur
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    if epochs_no_improve >= es_patience:
-                        logger.info(f"Early stopping at epoch {epoch}: no improvement in {es_patience} epochs on {es_metric}.")
-                        break
 
         # 使用最佳权重（如果有）进行最终测试评估
         if best_ckpt_state is not None:

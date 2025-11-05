@@ -15,7 +15,7 @@ def main():
     from .train.trainer import train_from_config
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, required=True, help='preprocess / train / eval')
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml')
+    parser.add_argument('--config', type=str, default='configs/train_config.yml')
     args = parser.parse_args()
 
     if args.mode == 'preprocess':

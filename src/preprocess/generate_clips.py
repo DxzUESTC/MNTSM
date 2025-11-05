@@ -56,13 +56,14 @@ def compute_face_feature(aligned_face):
     return np.array(features, dtype=np.float32)
 
 
-def is_video_processed(video_path, output_root, raw_root=None):
+def is_video_processed(video_path, output_root, raw_root=None, face_size=None):
     """检查视频是否已经被成功处理过
     
     Args:
         video_path: 原始视频文件完整路径
         output_root: 存放处理结果的根目录
         raw_root: raw_videos 的根目录
+        face_size: 需要匹配的人脸尺寸（如果提供，会检查元数据中的face_size是否匹配）
     
     Returns:
         bool: True表示已处理且完整，False表示未处理或不完整
@@ -89,6 +90,12 @@ def is_video_processed(video_path, output_root, raw_root=None):
         # 检查是否有错误标记
         if 'error' in meta:
             return False
+        
+        # 如果指定了 face_size，检查元数据中的 face_size 是否匹配
+        if face_size is not None:
+            meta_face_size = meta.get('face_size', None)
+            if meta_face_size != face_size:
+                return False  # 分辨率不匹配，需要重新处理
         
         # 检查是否有有效的 clips
         if len(meta.get('clips', [])) == 0:
@@ -161,7 +168,7 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
     os.makedirs(meta_dir, exist_ok=True)
     
     # 如果设置了跳过已处理的视频且该视频已处理过，直接返回
-    if skip_if_processed and is_video_processed(video_path, output_root, raw_root):
+    if skip_if_processed and is_video_processed(video_path, output_root, raw_root, face_size=face_size):
         try:
             meta_path = os.path.join(meta_dir, 'clip_meta.json')
             with open(meta_path, 'r', encoding='utf-8') as f:
@@ -210,11 +217,17 @@ def build_clips(video_path, output_root, detector, fps=4, clip_len=8, raw_root=N
                 try:
                     aligned = cv2.imread(aligned_cache_path)
                     feat = np.load(feature_cache_path)
+                    # 检查缓存图像的分辨率是否匹配当前 face_size
                     if aligned is not None and feat is not None:
-                        aligned_imgs.append(aligned)
-                        features.append(feat)
-                        src_indices.append(i)
-                        continue
+                        h, w = aligned.shape[:2]
+                        if h == face_size and w == face_size:
+                            aligned_imgs.append(aligned)
+                            features.append(feat)
+                            src_indices.append(i)
+                            continue
+                        else:
+                            # 缓存分辨率不匹配，需要重新处理
+                            print(f"[INFO] 缓存分辨率不匹配 ({h}x{w} vs {face_size}x{face_size})，重新处理: {fname}")
                 except Exception as e:
                     print(f"[WARN] 加载缓存失败，将重新处理: {fname}, 错误: {e}")
             

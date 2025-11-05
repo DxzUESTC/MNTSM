@@ -31,3 +31,7 @@ ENV/
 experiments/logs/
 *.tb_log
 InsightErrorLog
+
+# 模型缓存（预训练权重文件较大，不提交到git）
+cache/
+# 注意：不忽略experiments/checkpoints/下的检查点文件，这些可能需要版本控制

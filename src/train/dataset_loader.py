@@ -122,7 +122,8 @@ class DeepfakeDataset(Dataset):
             if self.allow_skip:
                 # 返回一个占位符（或者抛出异常，由DataLoader处理）
                 # 这里返回全零张量作为占位符，实际训练时可能需要特殊处理
-                images = [np.zeros((112, 112, 3), dtype=np.uint8)]
+                # 注意：占位符尺寸应与实际输入尺寸一致（默认224）
+                images = [np.zeros((224, 224, 3), dtype=np.uint8)]
             else:
                 raise ValueError(f"Clip {clip_dir} 没有可加载的帧")
         

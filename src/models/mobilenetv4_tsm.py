@@ -3,6 +3,7 @@
 将TSM模块集成到MobileNetV4中，实现高效的时序建模能力。
 支持灵活的TSM插入位置配置。
 """
+import os
 import torch.nn as nn
 try:
     import timm
@@ -12,6 +13,49 @@ except ImportError:
     print("Warning: timm not available, cannot load MobileNetV4 from timm")
 
 from .tsm import TemporalShift, TSMConv2d, insert_tsm_to_module, make_tsm_conv2d, insert_tsm_residual_shift, insert_tsm_after_expansion
+
+
+def _setup_timm_cache(cache_dir=None):
+    """设置timm的缓存目录，避免每次联网下载预训练权重
+    
+    Args:
+        cache_dir: 缓存目录路径，如果为None则使用项目目录下的 cache/models
+                   支持相对路径（相对于项目根目录）和绝对路径
+    """
+    if not TIMM_AVAILABLE:
+        return None
+    
+    # 获取项目根目录（假设src/models在项目根目录下）
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    
+    # 如果没有指定缓存目录，使用项目目录下的 cache/models
+    if cache_dir is None:
+        cache_dir = os.path.join(project_root, 'cache', 'models')
+    else:
+        # 如果是相对路径，相对于项目根目录
+        if not os.path.isabs(cache_dir):
+            cache_dir = os.path.join(project_root, cache_dir)
+    
+    # 转换为绝对路径
+    cache_dir = os.path.abspath(cache_dir)
+    
+    # 创建缓存目录
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # 设置timm的缓存目录环境变量
+    # timm使用TORCH_HOME环境变量来指定模型缓存位置
+    # 注意：只在环境变量未设置时设置，避免覆盖用户已有的设置
+    if 'TORCH_HOME' not in os.environ:
+        os.environ['TORCH_HOME'] = cache_dir
+    
+    # 同时设置HF_HOME（如果使用huggingface hub作为后端）
+    # timm可能使用huggingface hub下载某些模型
+    hf_cache = os.path.join(cache_dir, 'huggingface')
+    os.makedirs(hf_cache, exist_ok=True)
+    if 'HF_HOME' not in os.environ:
+        os.environ['HF_HOME'] = hf_cache
+    
+    return cache_dir
 
 
 class MNTSMModel(nn.Module):
@@ -230,7 +274,7 @@ class MNTSMModel(nn.Module):
 
 def create_mntsm_model(model_name='mobilenetv4', pretrained=True, 
                        n_segment=8, fold_div=8, tsm_locations=None, 
-                       mode='replace', **kwargs):
+                       mode='replace', cache_dir=None, **kwargs):
     """便捷函数：创建MobileNetV4 + TSM模型
     
     Args:
@@ -240,6 +284,7 @@ def create_mntsm_model(model_name='mobilenetv4', pretrained=True,
         fold_div (int): TSM通道移动比例
         tsm_locations (list, optional): TSM插入位置
         mode (str): TSM集成模式
+        cache_dir (str, optional): 预训练权重缓存目录，如果为None则使用项目目录下的 cache/models
         **kwargs: 传递给timm.create_model的其他参数
     
     Returns:
@@ -255,6 +300,13 @@ def create_mntsm_model(model_name='mobilenetv4', pretrained=True,
     """
     if not TIMM_AVAILABLE:
         raise ImportError("timm is required to load MobileNetV4. Install it with: pip install timm")
+    
+    # 设置timm缓存目录（仅在需要预训练权重时设置）
+    if pretrained:
+        cache_path = _setup_timm_cache(cache_dir)
+        if cache_path:
+            print(f"[INFO] 使用本地缓存目录: {cache_path}")
+            print(f"[INFO] 预训练权重将缓存到此目录，后续训练无需联网")
     
     # 从timm加载MobileNetV4
     backbone = timm.create_model(model_name, pretrained=pretrained, **kwargs)
