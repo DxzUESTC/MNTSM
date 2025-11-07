@@ -1,0 +1,41 @@
+# 泛化性测试配置
+# 在 Celeb-DF-v2 数据集上测试在 FFPP 上训练的模型
+
+exp_name: Generalization_FFPP_to_CelebDFv2
+seed: 42
+use_gpu: true
+amp: false  # 与训练时保持一致
+
+# 模型检查点路径（训练好的模型）
+checkpoint_path: D:\Share\MNTSM_Project\MNTSM\experiments\checkpoints\FFPP\224分辨率11月4日至5日训练结果\best.pth
+
+# 测试数据集配置
+data_root: data
+test_split_path: data/splits/Celeb-DF-v2_split_42.pkl  # Celeb-DF-v2 数据集划分文件
+
+# 数据加载配置
+batch_size: 32
+num_workers: 0           # Windows 下建议 0
+force_single_worker: true
+prefetch_factor: 2
+use_fast_io: true       # Windows: 使用 np.fromfile+cv2.imdecode
+allow_skip: true
+
+# 模型参数（通常从检查点自动读取，这里作为备用）
+model_name: mobilenetv4_conv_small_050.e3000_r224_in1k
+n_segment: 8
+fold_div: 4
+input_size: 224
+aggregate: attention     # mean / max / attention
+model_cache_dir: cache/models
+
+# 输出配置
+log_dir: generalization/experiments/logs
+ckpt_dir: generalization/experiments/checkpoints
+tensorboard: false
+console_log: true
+wandb:
+  enable: false
+  project: MNTSM_Generalization
+  run_name: ffpp-to-celebdfv2
+

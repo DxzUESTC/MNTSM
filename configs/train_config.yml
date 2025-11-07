@@ -4,17 +4,17 @@ exp_name: MNTSM_ResShift_MBV4_Opt
 seed: 42
 use_gpu: true
 amp: false               # FP16 梯度在 MobileNet + TSM 中传播时易 underflow，尤其是 small backbone + BCE Loss
-resume_from: D:\Share\MNTSM_Project\MNTSM\experiments\checkpoints\FFPP\last.pth        # none 或可填入 checkpoint 路径以断点恢复
+resume_from: none        # none 或可填入 checkpoint 路径以断点恢复（Celeb-DF-v2 新训练）
 reset_patience_on_resume: false  # 设为 true 时，恢复训练时会重置早停patience计数器，允许继续训练
 initial_patience_on_resume: 3    # 如果设置，恢复训练时会使用该值作为初始patience计数器（优先级高于reset_patience_on_resume）
 
 # 数据
 data_root: data
 index_path: data/dataset_index.pkl
-dataset_name: FFPP        # 仅使用 FFPP 数据集
+dataset_name: Celeb-DF-V2        # 仅使用 Celeb-DF-V2 数据集
 val_ratio: 0.10          # 验证集 10%
 test_ratio: 0.10         # 测试集 10%
-split_cache_path: data/splits/FFPP_split_42.pkl  # 数据集划分缓存路径（基于视频级划分）
+split_cache_path: data/splits/Celeb-DF-v2_split_42.pkl  # 数据集划分缓存路径（基于视频级划分）
 batch_size: 32            # 输入恢复224，适当降低batch以避免OOM
 num_workers: 1            # Windows 下建议 0 以避免共享内存错误 1455
 force_single_worker: true

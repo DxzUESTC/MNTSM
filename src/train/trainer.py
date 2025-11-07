@@ -13,6 +13,7 @@ from .dataset_loader import DeepfakeDataset
 from .evaluator import evaluate
 from ..models.mobilenetv4_tsm import create_mntsm_model
 from ..utils.logger import experiment_logger
+from ..utils.dataset_split import split_clips_by_video, count_unique_videos
 
 
 def _aggregate_time_dimension(outputs, batch_size, num_segments, mode="mean"):
@@ -156,70 +157,6 @@ def _load_index(index_path):
     return data['clips'] if isinstance(data, dict) and 'clips' in data else data
 
 
-def _split_clips_three(clips, val_ratio=0.1, test_ratio=0.1, seed=42):
-    """
-    按视频进行 训练/验证/测试 分层随机划分，确保同一视频的所有clips都在同一个集合中。
-    
-    这避免了数据泄露：同一视频的不同clips如果在训练/验证/测试集中分布，会导致过拟合。
-    """
-    assert val_ratio >= 0 and test_ratio >= 0 and (val_ratio + test_ratio) < 1.0
-    
-    # 按视频分组：使用 raw_rel_path 作为视频的唯一标识
-    video_to_clips = {}
-    for clip in clips:
-        video_id = clip.get('raw_rel_path', '')
-        if video_id not in video_to_clips:
-            video_to_clips[video_id] = []
-        video_to_clips[video_id].append(clip)
-    
-    # 将视频按真实/伪造分类
-    real_videos = []  # 每个元素是 (video_id, clips_list, label)
-    fake_videos = []
-    for video_id, video_clips in video_to_clips.items():
-        # 使用第一个clip的标签（同一个视频的所有clips标签应该一致）
-        label = video_clips[0].get('label', 0)
-        if label == 0:
-            real_videos.append((video_id, video_clips, label))
-        else:
-            fake_videos.append((video_id, video_clips, label))
-    
-    # 随机打乱视频列表
-    rng = random.Random(seed)
-    rng.shuffle(real_videos)
-    rng.shuffle(fake_videos)
-    
-    def split_three(lst):
-        """按视频划分"""
-        n_total = len(lst)
-        n_val = int(math.floor(n_total * val_ratio))
-        n_test = int(math.floor(n_total * test_ratio))
-        n_train = max(0, n_total - n_val - n_test)
-        train_part = lst[:n_train]
-        val_part = lst[n_train:n_train+n_val]
-        test_part = lst[n_train+n_val:n_train+n_val+n_test]
-        return train_part, val_part, test_part
-    
-    # 分别对真实和伪造视频进行划分
-    real_tr, real_va, real_te = split_three(real_videos)
-    fake_tr, fake_va, fake_te = split_three(fake_videos)
-    
-    # 将视频列表展平为clips列表
-    def flatten_videos(video_list):
-        clips_list = []
-        for _, video_clips, _ in video_list:
-            clips_list.extend(video_clips)
-        return clips_list
-    
-    train_clips = flatten_videos(real_tr) + flatten_videos(fake_tr)
-    val_clips = flatten_videos(real_va) + flatten_videos(fake_va)
-    test_clips = flatten_videos(real_te) + flatten_videos(fake_te)
-    
-    # 最后打乱clips顺序（但保持视频级划分不变）
-    rng.shuffle(train_clips)
-    rng.shuffle(val_clips)
-    rng.shuffle(test_clips)
-    
-    return train_clips, val_clips, test_clips
 
 
 def _compute_class_counts(clips):
@@ -228,14 +165,6 @@ def _compute_class_counts(clips):
     return {'real': num_real, 'fake': num_fake}
 
 
-def _count_unique_videos(clips):
-    """统计clips中唯一的视频数量"""
-    unique_videos = set()
-    for clip in clips:
-        video_id = clip.get('raw_rel_path', '')
-        if video_id:
-            unique_videos.add(video_id)
-    return len(unique_videos)
 
 
 class ClipTransform:
@@ -282,8 +211,12 @@ def build_dataloaders(config):
         # 仅保留指定数据集的 clips
         clips = [c for c in clips if c.get('dataset_name', '').lower() == str(dataset_name_filter).lower()]
     
-    # 尝试加载已保存的划分，否则重新划分并保存
+    # 尝试加载已保存的划分，否则根据配置重新划分（备用功能）
     split_cache_path = config.get('split_cache_path', None)
+    val_ratio = config.get('val_ratio', 0.1)
+    test_ratio = config.get('test_ratio', 0.1)
+    seed = config.get('seed', 42)
+    
     if split_cache_path and os.path.exists(split_cache_path):
         print(f"[Dataset Split] 加载已保存的划分: {split_cache_path}")
         with open(split_cache_path, 'rb') as f:
@@ -291,14 +224,28 @@ def build_dataloaders(config):
         train_clips = split_data['train_clips']
         val_clips = split_data['val_clips']
         test_clips = split_data['test_clips']
+        
+        # 可选：验证划分参数是否与配置一致
+        split_params = split_data.get('split_params', {})
+        if split_params:
+            saved_ratio = (split_params.get('val_ratio'), split_params.get('test_ratio'))
+            config_ratio = (val_ratio, test_ratio)
+            if saved_ratio != config_ratio:
+                print(f"[Dataset Split] 警告: 已保存划分的比例 {saved_ratio} 与配置中的比例 {config_ratio} 不一致")
     else:
-        train_clips, val_clips, test_clips = _split_clips_three(
+        # 备用功能：如果划分文件不存在，根据配置重新划分
+        print(f"[Dataset Split] 划分文件不存在，根据配置重新划分（比例: 训练集={1-val_ratio-test_ratio:.1%}, 验证集={val_ratio:.1%}, 测试集={test_ratio:.1%}, seed={seed}）")
+        if not split_cache_path:
+            print(f"[Dataset Split] 提示: 建议使用 'python src/utils/generate_split.py --dataset {dataset_name_filter or 'DATASET'} --seed {seed}' 预先生成划分文件")
+        
+        train_clips, val_clips, test_clips = split_clips_by_video(
             clips,
-            val_ratio=config.get('val_ratio', 0.1),
-            test_ratio=config.get('test_ratio', 0.1),
-            seed=config.get('seed', 42)
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed
         )
-        # 保存划分结果
+        
+        # 如果提供了 split_cache_path，保存划分结果以便下次使用
         if split_cache_path:
             print(f"[Dataset Split] 保存划分结果: {split_cache_path}")
             os.makedirs(os.path.dirname(split_cache_path), exist_ok=True)
@@ -307,9 +254,9 @@ def build_dataloaders(config):
                 'val_clips': val_clips,
                 'test_clips': test_clips,
                 'split_params': {
-                    'val_ratio': config.get('val_ratio', 0.1),
-                    'test_ratio': config.get('test_ratio', 0.1),
-                    'seed': config.get('seed', 42),
+                    'val_ratio': val_ratio,
+                    'test_ratio': test_ratio,
+                    'seed': seed,
                     'dataset_name': dataset_name_filter
                 }
             }
@@ -377,9 +324,9 @@ def build_dataloaders(config):
     )
     # 打印数据集统计信息（包含视频级划分信息）
     print(f"[Dataset Split] Total clips: {len(clips)}")
-    print(f"[Dataset Split] Train: {len(train_clips)} clips, {_count_unique_videos(train_clips)} videos")
-    print(f"[Dataset Split] Val: {len(val_clips)} clips, {_count_unique_videos(val_clips)} videos")
-    print(f"[Dataset Split] Test: {len(test_clips)} clips, {_count_unique_videos(test_clips)} videos")
+    print(f"[Dataset Split] Train: {len(train_clips)} clips, {count_unique_videos(train_clips)} videos")
+    print(f"[Dataset Split] Val: {len(val_clips)} clips, {count_unique_videos(val_clips)} videos")
+    print(f"[Dataset Split] Test: {len(test_clips)} clips, {count_unique_videos(test_clips)} videos")
     # 返回类别计数用于设定损失权重
     return train_loader, val_loader, test_loader, _compute_class_counts(train_clips)
 

@@ -37,83 +37,10 @@ for clip in clips:
 
 print(f"共有 {len(video_to_clips)} 个唯一视频")
 
-# 定义划分函数（直接复制代码，避免导入依赖）
-import random
-import math
-
-def _count_unique_videos(clips):
-    """统计clips中唯一的视频数量"""
-    unique_videos = set()
-    for clip in clips:
-        video_id = clip.get('raw_rel_path', '')
-        if video_id:
-            unique_videos.add(video_id)
-    return len(unique_videos)
-
-
-def _split_clips_three(clips, val_ratio=0.1, test_ratio=0.1, seed=42):
-    """按视频进行 训练/验证/测试 分层随机划分，确保同一视频的所有clips都在同一个集合中。"""
-    assert val_ratio >= 0 and test_ratio >= 0 and (val_ratio + test_ratio) < 1.0
-    
-    # 按视频分组：使用 raw_rel_path 作为视频的唯一标识
-    video_to_clips = {}
-    for clip in clips:
-        video_id = clip.get('raw_rel_path', '')
-        if video_id not in video_to_clips:
-            video_to_clips[video_id] = []
-        video_to_clips[video_id].append(clip)
-    
-    # 将视频按真实/伪造分类
-    real_videos = []  # 每个元素是 (video_id, clips_list, label)
-    fake_videos = []
-    for video_id, video_clips in video_to_clips.items():
-        # 使用第一个clip的标签（同一个视频的所有clips标签应该一致）
-        label = video_clips[0].get('label', 0)
-        if label == 0:
-            real_videos.append((video_id, video_clips, label))
-        else:
-            fake_videos.append((video_id, video_clips, label))
-    
-    # 随机打乱视频列表
-    rng = random.Random(seed)
-    rng.shuffle(real_videos)
-    rng.shuffle(fake_videos)
-    
-    def split_three(lst):
-        """按视频划分"""
-        n_total = len(lst)
-        n_val = int(math.floor(n_total * val_ratio))
-        n_test = int(math.floor(n_total * test_ratio))
-        n_train = max(0, n_total - n_val - n_test)
-        train_part = lst[:n_train]
-        val_part = lst[n_train:n_train+n_val]
-        test_part = lst[n_train+n_val:n_train+n_val+n_test]
-        return train_part, val_part, test_part
-    
-    # 分别对真实和伪造视频进行划分
-    real_tr, real_va, real_te = split_three(real_videos)
-    fake_tr, fake_va, fake_te = split_three(fake_videos)
-    
-    # 将视频列表展平为clips列表
-    def flatten_videos(video_list):
-        clips_list = []
-        for _, video_clips, _ in video_list:
-            clips_list.extend(video_clips)
-        return clips_list
-    
-    train_clips = flatten_videos(real_tr) + flatten_videos(fake_tr)
-    val_clips = flatten_videos(real_va) + flatten_videos(fake_va)
-    test_clips = flatten_videos(real_te) + flatten_videos(fake_te)
-    
-    # 最后打乱clips顺序（但保持视频级划分不变）
-    rng.shuffle(train_clips)
-    rng.shuffle(val_clips)
-    rng.shuffle(test_clips)
-    
-    return train_clips, val_clips, test_clips
+from src.utils.dataset_split import split_clips_by_video, count_unique_videos
 
 # 执行划分
-train_clips, val_clips, test_clips = _split_clips_three(
+train_clips, val_clips, test_clips = split_clips_by_video(
     clips,
     val_ratio=0.1,
     test_ratio=0.1,
@@ -121,9 +48,9 @@ train_clips, val_clips, test_clips = _split_clips_three(
 )
 
 print(f"\n划分结果:")
-print(f"Train: {len(train_clips)} clips, {_count_unique_videos(train_clips)} videos")
-print(f"Val: {len(val_clips)} clips, {_count_unique_videos(val_clips)} videos")
-print(f"Test: {len(test_clips)} clips, {_count_unique_videos(test_clips)} videos")
+print(f"Train: {len(train_clips)} clips, {count_unique_videos(train_clips)} videos")
+print(f"Val: {len(val_clips)} clips, {count_unique_videos(val_clips)} videos")
+print(f"Test: {len(test_clips)} clips, {count_unique_videos(test_clips)} videos")
 
 # 验证没有数据泄露：检查每个视频的所有clips是否都在同一个集合中
 print(f"\n验证数据泄露...")
@@ -155,9 +82,9 @@ else:
 
 # 验证划分比例
 total_videos = len(video_to_clips)
-train_videos = _count_unique_videos(train_clips)
-val_videos = _count_unique_videos(val_clips)
-test_videos = _count_unique_videos(test_clips)
+train_videos = count_unique_videos(train_clips)
+val_videos = count_unique_videos(val_clips)
+test_videos = count_unique_videos(test_clips)
 
 print(f"\n视频划分比例:")
 print(f"Train: {train_videos} / {total_videos} = {train_videos/total_videos*100:.1f}%")

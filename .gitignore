@@ -1,6 +1,7 @@
 # 数据目录
 /data
 /ablation
+/doc
 
 # Python 缓存文件
 __pycache__/
@@ -36,4 +37,4 @@ InsightErrorLog
 cache/
 
 # 忽略experiments/checkpoints/下的检查点文件
-experiments/
+experiments/checkpoints/
