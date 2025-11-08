@@ -8,6 +8,7 @@ import pickle
 import os
 import sys
 import argparse
+from typing import Dict, Set, Tuple
 
 # 添加项目根目录到路径
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,6 +21,56 @@ from src.utils.dataset_split import (
     extract_celebdf_video_id,
     extract_celebdf_identities,
 )
+
+
+def _normalize_celebdf_path(path: str) -> str:
+    """统一 Celeb-DF-v2 路径表示，便于匹配."""
+    if not path:
+        return ''
+    normalized = path.strip().replace('\\', '/')
+    if not normalized.lower().startswith('celeb-df-v2/'):
+        normalized = f"Celeb-DF-v2/{normalized.lstrip('/')}"
+    return normalized.lower()
+
+
+def _load_official_test_list(file_path: str) -> Tuple[Set[str], Dict[str, int]]:
+    """
+    读取官方提供的测试视频列表。
+
+    文件格式通常为：
+        1 YouTube-real/00001.mp4
+        0 Celeb-synthesis/id1_id0_0007.mp4
+
+    Returns:
+        test_videos: 归一化后的视频相对路径集合（含 'Celeb-DF-v2/' 前缀，统一小写）
+        label_map: 该集合中每个视频的官方标签（0=伪造，1=真实，如文件中提供）
+    """
+    test_videos: Set[str] = set()
+    label_map: Dict[str, int] = {}
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f'官方测试列表不存在: {file_path}')
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            raw = line.strip()
+            if not raw or raw.startswith('#'):
+                continue
+
+            parts = raw.split()
+            if parts[0] in {'0', '1'} and len(parts) >= 2:
+                label = int(parts[0])
+                rel_path = ' '.join(parts[1:])
+            else:
+                label = None
+                rel_path = raw
+
+            norm_path = _normalize_celebdf_path(rel_path)
+            test_videos.add(norm_path)
+            if label is not None:
+                label_map[norm_path] = label
+
+    return test_videos, label_map
 
 
 def main():
@@ -38,6 +89,10 @@ def main():
                        help='随机种子（默认: 42）')
     parser.add_argument('--verify', action='store_true',
                        help='验证划分结果，检查是否有数据泄露')
+    parser.add_argument('--test_list_path', type=str, default=None,
+                       help='官方测试列表路径（如 Celeb-DF-v2/List_of_testing_videos.txt），提供时将固定测试集')
+    parser.add_argument('--output_name', type=str, default=None,
+                       help='输出文件名（默认: {dataset}_split_{seed}.pkl）')
     
     args = parser.parse_args()
     
@@ -80,21 +135,68 @@ def main():
     real_videos = sum(1 for c in clips if c.get('label', 0) == 0)
     fake_videos = sum(1 for c in clips if c.get('label', 0) == 1)
     print(f"[INFO] 真实视频 clips: {real_videos}, 伪造视频 clips: {fake_videos}")
-    
-    # 执行划分
-    print(f"\n[INFO] 开始划分数据集（比例: 训练集={1-args.val_ratio-args.test_ratio:.1%}, 验证集={args.val_ratio:.1%}, 测试集={args.test_ratio:.1%}, seed={args.seed}）")
-    train_clips, val_clips, test_clips = split_clips_by_video(
-        clips,
+
+    # 如果提供了官方测试列表，优先使用官方划分
+    official_test_videos = set()
+    official_test_labels: Dict[str, int] = {}
+    train_clips = []
+    val_clips = []
+    test_clips = []
+    remaining_clips = clips
+    applied_test_ratio = args.test_ratio
+
+    if args.test_list_path:
+        print(f"\n[INFO] 使用官方测试划分: {args.test_list_path}")
+        official_test_videos, official_test_labels = _load_official_test_list(args.test_list_path)
+        print(f"[INFO] 官方列表包含 {len(official_test_videos)} 个测试视频")
+
+        test_clip_list = []
+        remaining = []
+        matched_videos = set()
+
+        for clip in clips:
+            raw_path = _normalize_celebdf_path(clip.get('raw_rel_path', ''))
+            if raw_path in official_test_videos:
+                test_clip_list.append(clip)
+                matched_videos.add(raw_path)
+            else:
+                remaining.append(clip)
+
+        missing_videos = official_test_videos - matched_videos
+        if missing_videos:
+            print(f"[WARN] {len(missing_videos)} 个官方测试视频在索引中未找到，例如: {list(missing_videos)[:5]}")
+        else:
+            print("[INFO] 已成功匹配所有官方测试视频到剪辑索引")
+
+        test_clips = test_clip_list
+        remaining_clips = remaining
+        applied_test_ratio = 0.0  # 剩余部分仅进行训练/验证划分
+        if args.test_ratio not in (0, 0.0):
+            print(f"[INFO] 忽略 --test_ratio={args.test_ratio} （官方测试集已固定，剩余部分将使用 val_ratio={args.val_ratio:.3f}、test_ratio=0 进行划分）")
+
+    # 对剩余数据执行划分
+    print(f"\n[INFO] 开始划分数据集（剩余部分比例: 训练集={1-args.val_ratio-applied_test_ratio:.1%}, 验证集={args.val_ratio:.1%}, 测试集={applied_test_ratio:.1%}, seed={args.seed}）")
+    train_part, val_part, extra_test_part = split_clips_by_video(
+        remaining_clips,
         val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
+        test_ratio=applied_test_ratio,
         seed=args.seed
     )
+
+    train_clips.extend(train_part)
+    val_clips.extend(val_part)
+    if applied_test_ratio > 0:
+        test_clips.extend(extra_test_part)
+    elif extra_test_part:
+        # 在官方测试固定但算法仍返回了少量test clips时，将其并入验证集并给出提示
+        print(f"[WARN] 划分函数输出了 {len(extra_test_part)} 个额外测试clips，将其并入验证集以保持官方划分。")
+        val_clips.extend(extra_test_part)
     
     # 统计划分结果
     train_videos = count_unique_videos(train_clips)
     val_videos = count_unique_videos(val_clips)
     test_videos = count_unique_videos(test_clips)
-    
+
     print(f"\n[INFO] 划分结果:")
     print(f"  训练集: {len(train_clips)} clips, {train_videos} videos ({train_videos/total_videos*100:.1f}%)")
     print(f"  验证集: {len(val_clips)} clips, {val_videos} videos ({val_videos/total_videos*100:.1f}%)")
@@ -227,7 +329,10 @@ def main():
                 print(f"  [ERROR] 身份连通：发现 {identity_leak_count} 个身份同时出现在多个集合，违反划分约束。")
     
     # 保存划分结果
-    output_filename = f"{args.dataset}_split_{args.seed}.pkl"
+    if args.output_name:
+        output_filename = args.output_name
+    else:
+        output_filename = f"{args.dataset}_split_{args.seed}.pkl"
     output_path = os.path.join(args.output_dir, output_filename)
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -238,12 +343,14 @@ def main():
         'split_params': {
             'dataset_name': args.dataset,
             'val_ratio': args.val_ratio,
-            'test_ratio': args.test_ratio,
+            'test_ratio': args.test_ratio if not args.test_list_path else 0.0,
             'seed': args.seed,
             'total_videos': total_videos,
             'train_videos': train_videos,
             'val_videos': val_videos,
             'test_videos': test_videos,
+            'official_test_list': args.test_list_path,
+            'official_test_videos': len(official_test_videos) if official_test_videos else None,
         }
     }
     

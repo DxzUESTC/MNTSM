@@ -7,6 +7,18 @@ from sklearn.metrics import roc_auc_score, f1_score, balanced_accuracy_score
 
 def _infer_step(model, batch, device, n_segment=None, aggregate="mean", amp=False):
     """对一个 batch 进行前向并返回 clip-level 概率与标签、可选视频ID。"""
+    def _temporal_enhance(seq):
+        """相邻帧差分增强，用于注意力聚合稳定化。"""
+        if seq.size(1) <= 1:
+            return seq
+        diff = torch.zeros_like(seq)
+        diff[:, 1:] = seq[:, 1:] - seq[:, :-1]
+        if seq.dim() == 3 and seq.size(-1) > 1:
+            diff = F.layer_norm(diff, diff.shape[-1:])
+        else:
+            diff = torch.sigmoid(diff)
+        return seq + diff
+
     if isinstance(batch, (list, tuple)):
         if len(batch) == 3:
             clip_tensor, labels, meta = batch
@@ -38,15 +50,16 @@ def _infer_step(model, batch, device, n_segment=None, aggregate="mean", amp=Fals
     if outputs.dim() == 2 and outputs.size(-1) > 1:
         # 多分类（假设二分类 num_classes=2），取类别1的概率
         logits = outputs.view(B, T_eff, -1)
-        probs = F.softmax(logits, dim=-1)[..., 1]
         if aggregate == "max":
-            clip_probs = probs.max(dim=1).values
+            agg_logits = logits.max(dim=1).values
         elif aggregate == "attention":
-            scores = probs  # (B,T)
+            enhanced_logits = _temporal_enhance(logits)
+            scores = enhanced_logits.abs().sum(dim=-1, keepdim=True)
             alpha = torch.softmax(scores, dim=1)
-            clip_probs = (alpha * probs).sum(dim=1)
+            agg_logits = (alpha * enhanced_logits).sum(dim=1)
         else:
-            clip_probs = probs.mean(dim=1)
+            agg_logits = logits.mean(dim=1)
+        clip_probs = F.softmax(agg_logits, dim=-1)[..., 1]
     else:
         # 二分类单通道 logits
         logits = outputs.view(B, T_eff)
@@ -54,7 +67,8 @@ def _infer_step(model, batch, device, n_segment=None, aggregate="mean", amp=Fals
         if aggregate == "max":
             clip_probs = probs.max(dim=1).values
         elif aggregate == "attention":
-            alpha = torch.softmax(logits, dim=1)  # (B,T)
+            enhanced_logits = _temporal_enhance(logits.unsqueeze(-1)).squeeze(-1)
+            alpha = torch.softmax(enhanced_logits, dim=1)  # (B,T)
             clip_probs = (alpha * probs).sum(dim=1)
         else:
             clip_probs = probs.mean(dim=1)

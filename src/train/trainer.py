@@ -18,6 +18,25 @@ from ..utils.dataset_split import split_clips_by_video, count_unique_videos
 
 def _aggregate_time_dimension(outputs, batch_size, num_segments, mode="mean"):
     """将 (B*T, ...) 的模型输出还原为 (B, T, ...) 并按时间聚合为 (B, ...)。"""
+    def _temporal_enhance(seq):
+        """对序列进行相邻帧差分增强，缓解尺度问题。
+
+        Args:
+            seq: (B, T) 或 (B, T, F)
+
+        Returns:
+            与 seq 同形状的增强后张量
+        """
+        if seq.size(1) <= 1:
+            return seq
+        diff = torch.zeros_like(seq)
+        diff[:, 1:] = seq[:, 1:] - seq[:, :-1]
+        if seq.dim() == 3 and seq.size(-1) > 1:
+            diff = F.layer_norm(diff, diff.shape[-1:])
+        else:
+            diff = torch.sigmoid(diff)
+        return seq + diff
+
     if outputs.dim() == 1:
         outputs = outputs.view(batch_size, num_segments)
         if mode == "mean":
@@ -27,7 +46,8 @@ def _aggregate_time_dimension(outputs, batch_size, num_segments, mode="mean"):
         elif mode == "attention":
             # 非参数化注意力：对每帧logit做softmax权重
             scores = outputs  # (B, T)
-            alpha = torch.softmax(scores, dim=1)
+            enhanced_scores = _temporal_enhance(scores.unsqueeze(-1)).squeeze(-1)
+            alpha = torch.softmax(enhanced_scores, dim=1)
             probs = torch.sigmoid(scores)
             return (alpha * probs).sum(dim=1)
         else:
@@ -41,9 +61,10 @@ def _aggregate_time_dimension(outputs, batch_size, num_segments, mode="mean"):
             return outputs.max(dim=1).values
         elif mode == "attention":
             # 使用最后一维作为打分向量的投影（无参数近似）：score=||F_t||1
-            scores = outputs.abs().sum(dim=-1, keepdim=True)  # (B,T,1)
+            enhanced_outputs = _temporal_enhance(outputs)
+            scores = enhanced_outputs.abs().sum(dim=-1, keepdim=True)  # (B,T,1)
             alpha = torch.softmax(scores, dim=1)
-            return (alpha * outputs).sum(dim=1)
+            return (alpha * enhanced_outputs).sum(dim=1)
         else:
             return outputs.mean(dim=1)
 
@@ -213,8 +234,8 @@ def build_dataloaders(config):
     
     # 尝试加载已保存的划分，否则根据配置重新划分（备用功能）
     split_cache_path = config.get('split_cache_path', None)
-    val_ratio = config.get('val_ratio', 0.1)
-    test_ratio = config.get('test_ratio', 0.1)
+    val_ratio_cfg = config.get('val_ratio', None)
+    test_ratio_cfg = config.get('test_ratio', None)
     seed = config.get('seed', 42)
     
     if split_cache_path and os.path.exists(split_cache_path):
@@ -229,11 +250,17 @@ def build_dataloaders(config):
         split_params = split_data.get('split_params', {})
         if split_params:
             saved_ratio = (split_params.get('val_ratio'), split_params.get('test_ratio'))
-            config_ratio = (val_ratio, test_ratio)
-            if saved_ratio != config_ratio:
+            config_ratio = (val_ratio_cfg, test_ratio_cfg)
+            if val_ratio_cfg is not None and test_ratio_cfg is not None and saved_ratio != config_ratio:
                 print(f"[Dataset Split] 警告: 已保存划分的比例 {saved_ratio} 与配置中的比例 {config_ratio} 不一致")
     else:
         # 备用功能：如果划分文件不存在，根据配置重新划分
+        # 若未在配置中提供比例，回退到默认 0.1/0.1，并给出提示
+        val_ratio = 0.1 if val_ratio_cfg is None else float(val_ratio_cfg)
+        test_ratio = 0.1 if test_ratio_cfg is None else float(test_ratio_cfg)
+        if val_ratio_cfg is None or test_ratio_cfg is None:
+            print(f"[Dataset Split] 提示: 未在配置中检测到 val_ratio/test_ratio，使用默认比例 val=0.1, test=0.1 重新划分。")
+
         print(f"[Dataset Split] 划分文件不存在，根据配置重新划分（比例: 训练集={1-val_ratio-test_ratio:.1%}, 验证集={val_ratio:.1%}, 测试集={test_ratio:.1%}, seed={seed}）")
         if not split_cache_path:
             print(f"[Dataset Split] 提示: 建议使用 'python src/utils/generate_split.py --dataset {dataset_name_filter or 'DATASET'} --seed {seed}' 预先生成划分文件")
@@ -322,11 +349,38 @@ def build_dataloaders(config):
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
     )
-    # 打印数据集统计信息（包含视频级划分信息）
+    # 打印数据集统计信息（包含视频级划分信息与占比）
+    total_clips_all = len(train_clips) + len(val_clips) + len(test_clips)
+    total_videos_all = len({c.get('raw_rel_path', '') for c in clips if c.get('raw_rel_path', '')})
+    train_videos = count_unique_videos(train_clips)
+    val_videos = count_unique_videos(val_clips)
+    test_videos = count_unique_videos(test_clips)
+
+    def _pct(numerator: int, denominator: int) -> float:
+        return 0.0 if denominator == 0 else (numerator / denominator) * 100.0
+
     print(f"[Dataset Split] Total clips: {len(clips)}")
-    print(f"[Dataset Split] Train: {len(train_clips)} clips, {count_unique_videos(train_clips)} videos")
-    print(f"[Dataset Split] Val: {len(val_clips)} clips, {count_unique_videos(val_clips)} videos")
-    print(f"[Dataset Split] Test: {len(test_clips)} clips, {count_unique_videos(test_clips)} videos")
+    print(f"[Dataset Split] Train: {len(train_clips)} clips, {train_videos} videos")
+    print(f"[Dataset Split] Val: {len(val_clips)} clips, {val_videos} videos")
+    print(f"[Dataset Split] Test: {len(test_clips)} clips, {test_videos} videos")
+    print(f"[Dataset Split] Clip占比 -> Train { _pct(len(train_clips), total_clips_all):.2f}% | Val { _pct(len(val_clips), total_clips_all):.2f}% | Test { _pct(len(test_clips), total_clips_all):.2f}%")
+    print(f"[Dataset Split] Video占比 -> Train { _pct(train_videos, total_videos_all):.2f}% | Val { _pct(val_videos, total_videos_all):.2f}% | Test { _pct(test_videos, total_videos_all):.2f}%")
+
+    train_class_counts = _compute_class_counts(train_clips)
+    val_class_counts = _compute_class_counts(val_clips)
+    test_class_counts = _compute_class_counts(test_clips)
+
+    def _fmt_class_line(name: str, stats: dict, total: int) -> str:
+        real = stats.get('real', 0)
+        fake = stats.get('fake', 0)
+        return (f"  - {name:<5}Real {real} ({_pct(real, total):.2f}%) | "
+                f"Fake {fake} ({_pct(fake, total):.2f}%)")
+
+    print("[Dataset Split] 类别统计 (clips):")
+    print(_fmt_class_line("Train", train_class_counts, max(1, len(train_clips))))
+    print(_fmt_class_line("Val", val_class_counts, max(1, len(val_clips))))
+    print(_fmt_class_line("Test", test_class_counts, max(1, len(test_clips))))
+
     # 返回类别计数用于设定损失权重
     return train_loader, val_loader, test_loader, _compute_class_counts(train_clips)
 
